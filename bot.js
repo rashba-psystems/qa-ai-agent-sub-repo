@@ -1,6 +1,5 @@
 'use strict';
 
-const os = require('os');
 const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '.env'), override: true });
 
@@ -11,18 +10,19 @@ const { handleTest, handleRegress } = require('./src/bot/handlers/testHandler');
 const { handleChecklist } = require('./src/bot/handlers/checklistHandler');
 const { handleInvestigate } = require('./src/bot/handlers/investigateHandler');
 const { handlePolicy } = require('./src/bot/handlers/policyHandler');
-const { ogpoWizard } = require('./src/bot/handlers/webOgpoPolicyHandler');
-const { ogpoLegalWizard } = require('./src/bot/handlers/webOgpoLegalEntityPolicyHandlers');
+const { handleWebOgpoPolicy } = require('./src/bot/handlers/webOgpoPolicyHandler');
+const { handleWebOgpoLegal } = require('./src/bot/handlers/webOgpoLegalEntityPolicyHandler');
 const { mstWizard } = require('./src/bot/handlers/webMstPolicyHandler');
 const { mstPremiumWizard } = require('./src/bot/handlers/webMstPremiumPolicyHandlers');
 const { nsWizard } = require('./src/bot/handlers/webNsPolicyHandlers');
 const { removeUserFromQueue } = require('./src/bot/queue')
+const { initBrowser, closeBrowser } = require('./src/bot/middleware/browserManager');
 
 const bot = new Telegraf(process.env.BOT_TOKEN, {
   handlerTimeout: 10 * 60 * 1000, // 10 minutes — AI gen + PDF upload + playwright
 });
 
-const stage = new Scenes.Stage([ogpoWizard, ogpoLegalWizard, mstWizard, mstPremiumWizard, nsWizard]);
+const stage = new Scenes.Stage([mstWizard, mstPremiumWizard, nsWizard]);
 
 // Команда отмены для сцен
 stage.hears('cancel', async (ctx) => {
@@ -73,7 +73,7 @@ _Пример: policy ns NS\\-2025\\-000099_
 
 \`web ogpo individual | web ogpo legal>\`
 Оформить полис ОГПО (Playwright + OCR + CRM)
-_Пример: web ogpo phis_ — для физических лиц
+_Пример: web ogpo individual_ — для физических лиц
 _Пример: web ogpo legal_ — для юридических лиц
 
 \`web mst | web mst premium\`
@@ -119,15 +119,35 @@ bot.on(['text', 'photo', 'document'], async (ctx) => {
     case 'web': {
       const subCommand = args.join(' ').toLowerCase();
 
-      if (subCommand === 'ogpo phis') {
-        return rateLimitMiddleware(ctx, () => ctx.scene.enter('OGPO_SCENE'));
-      } if (subCommand === 'ogpo legal') {
-        return rateLimitMiddleware(ctx, () => ctx.scene.enter('OGPO_LEGAL_SCENE'));
-      } if (subCommand === 'mst') {
-        return rateLimitMiddleware(ctx, () => ctx.scene.enter('MST_SCENE'));
-      } if (subCommand === 'mst premium') {
+      console.log(`[DEBUG] Поймал команду web! subCommand: "${subCommand} от пользователя с ID: ${ctx.from.id}"`);
+
+      if (subCommand === 'ogpo individual') {
+        rateLimitMiddleware(ctx, async () => {
+          handleWebOgpoPolicy(ctx).catch(err => {
+            console.error(`[ERROR] Сбой в сценарии для ID ${ctx.from.id}:`, err);
+          });
+        });
+        return;
+      } 
+      
+      if (subCommand === 'ogpo legal') {
+        rateLimitMiddleware(ctx, async () => {
+          handleWebOgpoLegal(ctx).catch(err => {
+            console.error(`[ERROR] Сбой в сценарии для ID ${ctx.from.id}:`, err);
+          });
+        });
+        return;
+      }
+      
+      if (subCommand === 'mst') {
+        return rateLimitMiddleware(ctx, async () => ctx.scene.enter('MST_SCENE'));
+      }
+      
+      if (subCommand === 'mst premium') {
         return rateLimitMiddleware(ctx, () => ctx.scene.enter('MST_PREMIUM_SCENE'));
-      } if (subCommand === 'ns')  {
+      }
+      
+      if (subCommand === 'ns')  {
         return rateLimitMiddleware(ctx, () => ctx.scene.enter('NS_SCENE'));
       } else {
         return ctx.reply(
@@ -160,11 +180,22 @@ bot.catch((err, ctx) => {
 });
 
 if (require.main === module) {
-  bot.launch({ dropPendingUpdates: true });
-  console.log('QA AI Agent running...');
+  initBrowser().then(() => {
+    bot.launch({ dropPendingUpdates: true });
+    console.log("QA AI Agent running...");
+  }).catch(err => {
+    console.error('Error to launch bot', err);
+  });
 };
 
 module.exports = bot;
 
-process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
+process.once('SIGINT', async () => {
+  await closeBrowser();
+  bot.stop('SIGINT');
+});
+
+process.once('SIGTERM', async () => {
+  await closeBrowser();
+  bot.stop('SIGTERM');
+});
