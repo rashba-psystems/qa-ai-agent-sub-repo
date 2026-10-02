@@ -14,7 +14,7 @@ const { handleWebOgpoPolicy } = require('./src/bot/handlers/webOgpoPolicyHandler
 const { handleWebOgpoLegal } = require('./src/bot/handlers/webOgpoLegalEntityPolicyHandler');
 const { mstWizard } = require('./src/bot/handlers/webMstPolicyHandler');
 const { mstPremiumWizard } = require('./src/bot/handlers/webMstPremiumPolicyHandlers');
-const { nsWizard } = require('./src/bot/handlers/webNsPolicyHandlers');
+const { handleNsCommand, isInfoCommand } = require('./src/bot/handlers/nsHandler');
 const { removeUserFromQueue } = require('./src/bot/queue')
 const { initBrowser, closeBrowser } = require('./src/bot/middleware/browserManager');
 
@@ -22,7 +22,7 @@ const bot = new Telegraf(process.env.BOT_TOKEN, {
   handlerTimeout: 10 * 60 * 1000, // 10 minutes — AI gen + PDF upload + playwright
 });
 
-const stage = new Scenes.Stage([mstWizard, mstPremiumWizard, nsWizard]);
+const stage = new Scenes.Stage([mstWizard, mstPremiumWizard]);
 
 // Команда отмены для сцен
 stage.hears('cancel', async (ctx) => {
@@ -79,8 +79,19 @@ _Пример: web ogpo legal_ — для юридических лиц
 \`web mst | web mst premium\`
 Оформить полис МСТ или МСТ Премиум (Playwright + OCR + CRM)
 
-\`web ns\`
-Оформить полис НС (Playwright + OCR + CRM)
+\`web ns [стандарт|спорт] [взрослые|дети] [1–10]\` — через сайт (браузер)
+Выписать полис НС; сумму, срок, виды спорта и роли бот выбирает сам
+_Пример: web ns спорт 3_
+_Пример: web ns дети 2_
+_web ns помощь_ — подсказка
+_web ns тесты_ — что именно проверяется
+_web ns ошибки_ — проверки формы на неправильных данных (без выписки)
+_web ns журнал_ — незавершённые выписки и снятие блокировки
+
+\`api ns\` — напрямую в сервер, без браузера
+Калькулятор и выписка через API (создаёт полисы)
+_api ns журнал_ — незавершённые заявки и снятие блокировки
+_api ns тесты_ — что именно проверяется
 
 \`cancel\`
 Прервать текущее оформление полиса
@@ -103,6 +114,16 @@ bot.on(['text', 'photo', 'document'], async (ctx) => {
   switch (command.toLowerCase()) {
     case 'test':
       return rateLimitMiddleware(ctx, () => handleTest(ctx, args));
+
+    case 'api': {
+      // `api ns [журнал | снять <id> | помощь]` — проверки НС напрямую в сервер, без браузера
+      if ((args[0] || '').toLowerCase() === 'ns') {
+        const nsArgs = args.slice(1);
+        if (isInfoCommand(nsArgs)) return handleNsCommand(ctx, 'api', nsArgs);
+        return rateLimitMiddleware(ctx, () => handleNsCommand(ctx, 'api', nsArgs));
+      }
+      return ctx.reply('Доступные команды:\n`api ns` — калькулятор и выписка через API (создаёт полисы)', { parse_mode: 'Markdown' });
+    }
 
     case 'regress':
       return rateLimitMiddleware(ctx, () => handleRegress(ctx, args));
@@ -147,11 +168,13 @@ bot.on(['text', 'photo', 'document'], async (ctx) => {
         return rateLimitMiddleware(ctx, () => ctx.scene.enter('MST_PREMIUM_SCENE'));
       }
       
-      if (subCommand === 'ns')  {
-        return rateLimitMiddleware(ctx, () => ctx.scene.enter('NS_SCENE'));
+      if (subCommand === 'ns' || subCommand.startsWith('ns ')) {
+        const nsArgs = args.slice(1);
+        if (isInfoCommand(nsArgs)) return handleNsCommand(ctx, 'web', nsArgs);
+        return rateLimitMiddleware(ctx, () => handleNsCommand(ctx, 'web', nsArgs));
       } else {
         return ctx.reply(
-          'Пожалуйста, укажите верный продукт. Доступные команды:\n`web ogpo individual` | `web ogpo legal`\n`web mst` | `web mst premium`\n`web ns`', 
+          'Пожалуйста, укажите верный продукт. Доступные команды:\n`web ogpo individual` | `web ogpo legal`\n`web mst` | `web mst premium`\n`web ns` | `web ns помощь`', 
           { parse_mode: 'Markdown' }
         )
       }

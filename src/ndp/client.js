@@ -48,7 +48,8 @@ async function getToken() {
   return login();
 }
 
-async function apiRequest(method, path, body, { retry = true } = {}) {
+// Raw call: never throws on HTTP errors — returns { status, data } (used by negative API checks).
+async function apiCall(method, path, body, { retry = true } = {}) {
   const token = await getToken();
   const res = await fetch(`${BASE_URL}${path}`, {
     method,
@@ -62,13 +63,18 @@ async function apiRequest(method, path, body, { retry = true } = {}) {
 
   if (res.status === 401 && retry) {
     cachedToken = null;
-    return apiRequest(method, path, body, { retry: false });
+    return apiCall(method, path, body, { retry: false });
   }
 
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
+  return { status: res.status, ok: res.ok, data };
+}
+
+async function apiRequest(method, path, body) {
+  const { status, ok, data } = await apiCall(method, path, body);
+  if (!ok) {
     const detail = data.errors ? JSON.stringify(data.errors) : data.message;
-    throw new Error(`NDP API ${method} ${path} -> ${res.status}: ${detail || 'unknown error'}`);
+    throw new Error(`NDP API ${method} ${path} -> ${status}: ${detail || 'unknown error'}`);
   }
   return data;
 }
@@ -97,6 +103,7 @@ async function getContractByNumber(contractNumber) {
 
 module.exports = {
   getToken,
+  apiCall,
   apiRequest,
   listContracts,
   getContractByNumber,
