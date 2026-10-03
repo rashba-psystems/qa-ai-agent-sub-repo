@@ -145,6 +145,7 @@ function expectationsOf(c) {
     startDate,
     endDate: startDate ? expectedEnd(startDate, term) : null,
     holderIin: client.iin,
+    holderName: client.person.full_name,
     holderBirthDate: client.person.born_date,
     insuredIins: [...(c.holderInsured === false ? [] : [client.iin]), ...(c.insureds || []).map((p) => p.iin)],
     sportCodes: c.sportCodes,

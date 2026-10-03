@@ -101,6 +101,7 @@ const PLACES = [
 const SAY = [
   [/^Карточка: страховая сумма$/, (k) => `В карточке полиса страховая сумма ${money(k.actual)} вместо ${money(k.expected)}`],
   [/^Карточка: ИИН страхователя$/, (k) => (k.actual === '—' ? 'В карточке полиса у страхователя не указан ИИН' : `В карточке полиса ИИН страхователя ${shown(k.actual)} вместо ${shown(k.expected)}`)],
+  [/^Карточка: страхователь — полное имя$/, (k) => `В карточке полиса страхователем указан другой человек: ${shown(k.actual)} вместо ${shown(k.expected)}`],
   [/^Карточка: страхователь — дата рождения$/, () => 'В карточке полиса у страхователя не указана дата рождения'],
   [/^Карточка: страхователь — номер документа$/, (k) => `В карточке полиса у страхователя нет номера документа (написано ${shown(k.actual)})`],
   [/^Карточка: застрахованный — полное имя$/, () => 'В карточке полиса у застрахованного не указаны фамилия и имя'],
@@ -296,8 +297,10 @@ function outlined(checks, kind) {
 }
 
 const SHOT_TITLE = {
+  recognition: () => 'Окно клиента: поля, которые сайт заполнил по скану документа (до исправления ботом)',
+  save: () => 'Окно клиента: человек не сохранился',
   certificate: () => 'Окно оформления после оплаты',
-  card: (r) => `Карточка полиса${r.contractNumber ? ` ${r.contractNumber}` : ''}`,
+  card: (r, shot) => `Карточка полиса${r.contractNumber ? ` ${r.contractNumber}` : ''}${shot.section ? `, раздел «${shot.section}»` : ''}`,
 };
 
 // Screenshots of scenarios with bugs (new and known) or a crash; the caption says what is outlined in red
@@ -310,20 +313,23 @@ function photos(results) {
     if (!bugs.length && !r.error) continue;
     const who = r.purchase ? '' : `${r.id} «${r.title}». `;
     const shots = r.shots || [];
+    const total = shots.length + (r.screenshot ? 1 : 0);
+    const n = (i) => (total > 1 ? `Снимок ${i + 1} из ${total}. ` : '');
     const on = (shot, k) => (shot.checks || []).includes(k.name) || (!!shot.axis && k.axis === shot.axis);
     shots.forEach((shot, i) => {
       const marked = bugs.filter((k) => on(shot, k));
       out.push({ image: shot.image, caption: caption([
-        `${shots.length > 1 ? `Снимок ${i + 1} из ${shots.length}. ` : ''}${who}${(SHOT_TITLE[shot.kind] || (() => 'Экран'))(r)}`,
+        `${n(i)}${who}${(SHOT_TITLE[shot.kind] || (() => 'Экран'))(r, shot)}`,
         marked.length ? 'Красным обведено:' : null,
         ...outlined(marked, shot.kind),
       ]) });
     });
-    if (!shots.length && r.screenshot) {
+    if (r.screenshot) {
+      const title = r.error ? 'Экран, на котором автотест остановился' : r.notIssuedReason ? 'Экран, на котором выписка остановилась' : 'Экран с ошибкой';
       out.push({ image: r.screenshot, caption: caption([
-        `${who}${r.error ? 'Экран, на котором автотест остановился' : 'Экран с ошибкой'}`,
-        r.error && plainError(r.error),
-        ...outlined(bugs),
+        `${n(shots.length)}${who}${title}`,
+        r.error ? plainError(r.error) : r.notIssuedReason,
+        ...(shots.length ? [] : outlined(bugs)),
       ]) });
     }
   }

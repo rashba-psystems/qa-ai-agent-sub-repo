@@ -119,6 +119,14 @@ function shownCheck(name, value, expected, good) {
   return check(name, good(value), expected, value);
 }
 
+// A name as shown vs the expected one: every shown word is in the expected name, in any order and case
+// (the card may leave out the patronymic)
+function sameName(name, shownName, expected) {
+  const words = (v) => String(v || '').toUpperCase().split(/\s+/).filter(Boolean);
+  const ok = words(shownName).length > 0 && words(shownName).every((w) => words(expected).includes(w));
+  return check(name, ok, expected, shownName || '(пусто)');
+}
+
 // The policy card in «Мои полисы», the part every product shares; products add their own rows (program, amount, territory)
 function cardChecks({ exp, card }) {
   if (!card) return [unverified('Карточка договора открыта в браузере', exp.contractNumber, 'карточку открыть не удалось', 'issue')];
@@ -130,6 +138,7 @@ function cardChecks({ exp, card }) {
     card.holderIinShown === '—'
       ? check('Карточка: ИИН страхователя', false, exp.holderIin, '—')
       : eq('Карточка: ИИН страхователя', card.holderIin, exp.holderIin, { missing: 'в карточке нет строки «ИИН / БИН»' }),
+    sameName('Карточка: страхователь — полное имя', card.holderName, exp.holderName),
     shownCheck('Карточка: страхователь — дата рождения', card.holderBirthShown, exp.holderBirthDate, (v) => v.split('.').reverse().join('-') === exp.holderBirthDate),
     shownCheck('Карточка: страхователь — номер документа', card.holderDocShown, 'тип и номер документа', hasDocNumber),
     shownCheck('Карточка: застрахованный — полное имя', card.insuredNameShown, 'ФИО', (v) => v !== '—'),

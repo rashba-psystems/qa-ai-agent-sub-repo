@@ -162,6 +162,7 @@ class PurchaseFlow {
     this.page = null;
     this.monitor = null;
     this.context = null;
+    this.shots = []; // bug screenshots, in the order they were taken: { image, kind, checks?, axis?, section? }
   }
 
   async open() {
@@ -206,6 +207,7 @@ class PurchaseFlow {
         el.style.outline = '3px solid #e5322d';
         el.style.outlineOffset = '2px';
         el.style.background = 'rgba(229, 50, 45, 0.08)';
+        el.dataset.qaBad = '1'; // sectionShot finds the section by it
       };
       // the nearest card block that starts with a section title must be this section
       const sections = [...new Set(fields.map((f) => f.section))].concat(['Данные по страховому полису', 'Страховые выплаты', 'Данные по страхователю', 'Данные о застрахованных']);
@@ -245,6 +247,46 @@ class PurchaseFlow {
       }
       return found;
     }, fields).catch(() => 0);
+  }
+
+  // One card section (the block that starts with its title) with what markFields outlined in it — readable
+  // in Telegram, unlike the whole long page; null when the section is not found
+  async sectionShot(section) {
+    const found = await this.page.evaluate((section) => {
+      const blocks = [...document.querySelectorAll('body *')]
+        .filter((el) => (el.innerText || '').trim().startsWith(section) && el.querySelector('[data-qa-bad]'));
+      if (!blocks.length) return false;
+      blocks.reduce((a, b) => (a.innerText.length <= b.innerText.length ? a : b)).dataset.qaSection = section;
+      return true;
+    }, section).catch(() => false);
+    if (!found) return null;
+    return this.page.locator(`[data-qa-section="${section}"]`).screenshot().catch(() => null);
+  }
+
+  // A window that scrolls inside (the client window), shot on a tall screen so nothing is cut off at the bottom
+  async wholeShot(locator) {
+    const size = this.page.viewportSize();
+    if (size) await this.page.setViewportSize({ width: size.width, height: 2000 }).catch(() => {});
+    await this.page.waitForTimeout(300);
+    const image = await locator.screenshot().catch(() => null);
+    if (size) await this.page.setViewportSize(size).catch(() => {});
+    return image;
+  }
+
+  // The client window as it is now (e.g. why the person was not saved), the error line outlined;
+  // the screen when the window is already closed
+  async clientModalShot() {
+    const modal = this.clientModal();
+    if (!(await modal.isVisible().catch(() => false))) return this.page.screenshot().catch(() => null);
+    await modal.evaluate((root) => {
+      const rx = /(не удалось|ошибк|обязательн|должен|некоррект)/i;
+      const leaf = [...root.querySelectorAll('*')].find((el) => !el.children.length && rx.test(el.textContent));
+      if (leaf) {
+        leaf.style.outline = '3px solid #e5322d';
+        leaf.style.outlineOffset = '2px';
+      }
+    }).catch(() => {});
+    return this.wholeShot(modal);
   }
 
   // The «Оформляем полис» window stuck on «Готовим сертификат…», outlined; null when it is not on screen
@@ -465,9 +507,9 @@ class PurchaseFlow {
   async fillFromDocument(person) {
     const ocr = await this.attachDocument(person.documentFile);
     if (ocr.ok) {
-      const ocrMismatches = await this.correctFilledFields(person);
+      const { wrong, image } = await this.correctFilledFields(person);
       const confirm = await this.confirmClientModal();
-      return { ...confirm, via: 'скан документа', ocrMismatches };
+      return { ...confirm, via: 'скан документа', ocrMismatches: wrong, ocrShot: image };
     }
     const manual = await this.fillManual(person);
     return { ...manual, via: `вручную — скан не распознан (${ocr.reason})` };
@@ -501,7 +543,8 @@ class PurchaseFlow {
   }
 
   // After recognition: every filled field vs what the person really has; wrong ones are put right (so the policy
-  // carries true data) and returned as [{ field, got, want }] — each is a recognition error
+  // carries true data) and returned as wrong: [{ field, got, want }] — each is a recognition error —
+  // with image: the window as the site filled it, wrong fields outlined (null when all is right)
   async correctFilledFields(person) {
     const ru = (iso) => (iso ? iso.split('-').reverse().join('.') : undefined);
     const want = {
@@ -523,10 +566,20 @@ class PurchaseFlow {
     for (const [i, f] of fields.entries()) {
       const w = want[f.label];
       if (!w || String(f.value).trim().toUpperCase() === String(w).toUpperCase()) continue;
-      wrong.push({ field: f.label.toLowerCase(), got: f.value || '(пусто)', want: w });
-      await inputs.nth(i).fill(w);
+      wrong.push({ i, field: f.label.toLowerCase(), got: f.value || '(пусто)', want: w });
     }
-    return wrong;
+    let image = null;
+    if (wrong.length) {
+      const paint = (on) => Promise.all(wrong.map((w) => inputs.nth(w.i).evaluate((el, on) => {
+        el.style.outline = on ? '3px solid #e5322d' : '';
+        el.style.outlineOffset = on ? '2px' : '';
+      }, on).catch(() => {})));
+      await paint(true);
+      image = await this.wholeShot(modal);
+      await paint(false);
+    }
+    for (const w of wrong) await inputs.nth(w.i).fill(w.want);
+    return { wrong: wrong.map(({ i, ...w }) => w), image };
   }
 
   // A person who could not be saved: close the window and empty their IIN field, so someone else can take the slot

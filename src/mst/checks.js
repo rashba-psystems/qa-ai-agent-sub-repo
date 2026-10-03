@@ -61,6 +61,7 @@ function expectations(c) {
     sportCode: c.sport && c.sport.value,
     levelCode: c.level && c.level.value,
     holderIin: client.iin,
+    holderName: client.person.full_name,
     holderBirthDate: client.person.born_date,
     insuredIins: [...(c.holderInsured ? [client.iin] : []), ...c.insureds.map((p) => p.iin)],
   };

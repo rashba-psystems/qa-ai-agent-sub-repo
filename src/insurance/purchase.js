@@ -84,15 +84,26 @@ async function runPurchase(flow, c, kit) {
   };
   const failed = (ins) => ins.ok === false || (ins.manual && !ins.manual.ok);
   const why = (ins) => (ins.manual && ins.manual.error) || ins.error || ins.lookup;
+  // recognition errors, with the window the site filled from the scan (taken before the bot put it right)
+  const recognised = (person, ins) => {
+    const wrong = recognitionChecks(person, ins);
+    checks.push(...wrong);
+    const image = ins.manual && ins.manual.ocrShot;
+    const names = wrong.filter((k) => k.ok === false).map((k) => k.name);
+    if (image && names.length) flow.shots.push({ image, kind: 'recognition', checks: names });
+  };
   for (const [idx, original] of (c.insureds || []).entries()) {
     let person = original;
     const marks = { http: flow.monitor.httpErrors.length, console: flow.monitor.consoleErrors.length };
     let ins = await addOne(person);
-    checks.push(...recognitionChecks(person, ins));
+    recognised(person, ins);
     // the test child is in ESBD but not in GBD: if the site cannot save her, that is the finding — a made-up
     // person takes her place so the purchase still goes on
     if (failed(ins) && person.fallback) {
-      checks.push(check('Человек из ЕСБД, которого нет в ГБД, сохраняется на сайте', false, 'сохранён', `${person.iin}: ${why(ins)}`));
+      const notSaved = check('Человек из ЕСБД, которого нет в ГБД, сохраняется на сайте', false, 'сохранён', `${person.iin}: ${why(ins)}`);
+      checks.push(notSaved);
+      const image = await flow.clientModalShot();
+      if (image) flow.shots.push({ image, kind: 'save', checks: [notSaved.name] });
       // the failed saves of this attempt are this finding, not stand noise
       const noise = (s) => /kdp\/save|status of 503/.test(s);
       flow.monitor.httpErrors.splice(marks.http, Infinity, ...flow.monitor.httpErrors.slice(marks.http).filter((e) => !noise(e.url)));
@@ -102,7 +113,7 @@ async function runPurchase(flow, c, kit) {
       c.insureds[idx] = person;
       Object.assign(exp, kit.expectations(c));
       ins = await addOne(person);
-      checks.push(...recognitionChecks(person, ins));
+      recognised(person, ins);
     }
     if (ins.esbdErrors) checks.push(check('ЕСБД сохраняет застрахованного с первого раза', false, '0 повторов', `${ins.esbdErrors} повтора`, { severity: 'note', axis: 'anomaly' }));
     if (failed(ins)) throw new FlowError('insured', `застрахованный ${person.iin} не добавлен: ${why(ins)}`);
@@ -162,10 +173,9 @@ async function runPurchase(flow, c, kit) {
   const esbdList = await waitEsbd(st.ContractNumber, 20000);
   const esbd = esbdList && esbdList.find((i) => i.system === 'esbd');
   const certUi = esbd && esbd.status === 'failed' ? { skipped: true } : await flow.waitCertificateUi(esbd && esbd.status === 'success' ? 30000 : 10000);
-  const shots = [];
   if ((esbd && esbd.status !== 'success') || (certUi && certUi.done === false)) {
     const image = await flow.certificateDialogShot();
-    if (image) shots.push({ image, kind: 'certificate', axis: 'integration' });
+    if (image) flow.shots.push({ image, kind: 'certificate', axis: 'integration' });
   }
 
   const contract = await contractById(st.ID, st.ContractNumber, kit.product);
@@ -175,8 +185,7 @@ async function runPurchase(flow, c, kit) {
   out.card = card;
   checks.push(...kit.resultChecks({ exp, contract, card, preview, step1, step3, payment, st }));
   checks.push(...integrationChecks({ list: esbdList, contract, certUi }));
-  if (card) shots.push(...(await cardShot(flow, checks)));
-  out.shots = shots;
+  if (card) flow.shots.push(...(await cardShot(flow, checks)));
   return { checks, out };
 }
 
@@ -198,6 +207,7 @@ const CARD_FIELDS = {
   'Карточка: территория': { section: POLICY, label: 'Территория страхования' },
   'Карточка: страховая сумма': { section: PAYOUTS, label: 'Страховая сумма' },
   'Карточка: страховая премия = калькулятор': { section: PAYOUTS, label: 'Страховая премия в тенге (₸)' },
+  'Карточка: страхователь — полное имя': { section: HOLDER, label: 'Полное имя' },
   'Карточка: ИИН страхователя': { section: HOLDER, label: 'ИИН / БИН' },
   'Карточка: страхователь — дата рождения': { section: HOLDER, label: 'Дата рождения' },
   'Карточка: страхователь — номер документа': { section: HOLDER, label: 'Документ' },
@@ -207,13 +217,24 @@ const CARD_FIELDS = {
   'Карточка: у застрахованного нет лишнего «0»': { section: INSURED, text: '0' },
 };
 
-// The card with its wrong fields outlined in red; nothing when the card is right
+const SECTIONS = [POLICY, PAYOUTS, HOLDER, INSURED];
+
+// The card with its wrong fields outlined in red, one picture per section (the whole long page is unreadable
+// in Telegram); the whole page for what no section picture shows. Nothing when the card is right.
 async function cardShot(flow, checks) {
   const wrong = checks.filter((k) => k.ok === false && CARD_FIELDS[k.name]);
   if (!wrong.length) return [];
   await flow.markFields(wrong.map((k) => CARD_FIELDS[k.name]));
-  const image = await flow.screenshot();
-  return image ? [{ image, kind: 'card', checks: wrong.map((k) => k.name) }] : [];
+  const shots = [];
+  for (const section of SECTIONS) {
+    const here = wrong.filter((k) => CARD_FIELDS[k.name].section === section).map((k) => k.name);
+    const image = here.length ? await flow.sectionShot(section) : null;
+    if (image) shots.push({ image, kind: 'card', section, checks: here });
+  }
+  const missed = wrong.filter((k) => !shots.some((x) => x.checks.includes(k.name))).map((k) => k.name);
+  const image = missed.length ? await flow.screenshot() : null;
+  if (image) shots.push({ image, kind: 'card', checks: missed });
+  return shots;
 }
 
 // Before anything is issued: settle the attempts that a crash or timeout left open.
@@ -279,7 +300,10 @@ async function runScenario(flow, c, body) {
   }
   if (flow.monitor) result.checks.push(...anomalyChecks(flow.monitor.finish()));
   result.status = statusOf(result.checks, result.error);
-  if (result.status !== 'pass' && flow.page && !(result.shots && result.shots.length)) result.screenshot = await flow.screenshot();
+  result.shots = flow.shots; // taken along the way — kept even when the run crashed later
+  // where it stopped (a crash or a purchase that did not go through), or a failed run with no picture yet
+  const stopped = result.error || result.notIssuedReason;
+  if (flow.page && (stopped || (result.status !== 'pass' && !result.shots.length))) result.screenshot = await flow.screenshot();
   await flow.close();
   return result;
 }
