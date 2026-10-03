@@ -272,7 +272,7 @@ async function runApiSuite({ onProgress = async () => {} } = {}) {
   const results = [];
   let done = 0;
   await onProgress({ done, total, current: 'проверяю незавершённые заявки прошлых запусков' });
-  const rec = await recoverJournal({ channel: 'api' });
+  const rec = await recoverJournal({ channel: 'api', product: 'ns' });
   if (rec.row) results.push({ ...rec.row, product: 'ns' });
 
   await onProgress({ done, total, current: `калькулятор: ${calcCases.length} проверок` });

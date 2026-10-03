@@ -172,8 +172,10 @@ async function cardShot(flow, checks) {
 // negative cases too, because the bug under test may let such a request issue a policy.
 // channel: only this run's attempts ('web' | 'api'; none = all); a corrupt file always counts.
 // Any open web attempt blocks the web purchase (WEB) whatever its parameters were.
-async function recoverJournal({ channel } = {}) {
-  const open = (await journal.pending()).filter((e) => !channel || e.state === 'corrupt' || e.channel === channel);
+// product: only that product's attempts (the API suites); none = every product (the site: one purchase at a time)
+async function recoverJournal({ channel, product } = {}) {
+  const mine = (e) => (!channel || e.channel === channel) && (!product || (e.product || 'ns') === product);
+  const open = (await journal.pending()).filter((e) => e.state === 'corrupt' || mine(e));
   if (!open.length) return { row: null, blocked: new Set() };
   const checks = [];
   const blocked = new Set();

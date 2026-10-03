@@ -16,13 +16,16 @@ const { generateIin, birthDateForAge, client } = require('../insurance/purchase'
 
 function syntheticPerson(age, { gender = 'male', lastName = 'ТЕСТОВ', firstName = 'АЛИХАН', offsetDays = 0, serial = 7000 } = {}) {
   const birthDate = birthDateForAge(age, offsetDays);
+  const iin = generateIin(birthDate, gender, serial);
   return {
-    iin: generateIin(birthDate, gender, serial),
+    iin,
     birthDate,
     gender,
     lastName,
     firstName,
-    docNumber: String(40000000 + (serial * 7919) % 9999999).padStart(9, '0'),
+    // from the IIN: the birth date (and so the IIN) moves with today, a fixed number would clash in ESBD with
+    // yesterday's person (ESBD then answers kdp/save with 503)
+    docNumber: iin.slice(-9),
     docDate: birthDateForAge(Math.min(age, 2)),
     docTypes: ['Свидетельство о рождении', 'Удостоверение личности'],
   };

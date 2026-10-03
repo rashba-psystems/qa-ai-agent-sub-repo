@@ -13,7 +13,7 @@ const { handlePolicy } = require('./src/bot/handlers/policyHandler');
 const { handleWebOgpoPolicy } = require('./src/bot/handlers/webOgpoPolicyHandler');
 const { handleWebOgpoLegal } = require('./src/bot/handlers/webOgpoLegalEntityPolicyHandler');
 const { handleNsCommand, isInfoCommand } = require('./src/bot/handlers/nsHandler');
-const { handleMstCommand, isMstInfoCommand } = require('./src/bot/handlers/mstHandler');
+const { handleMstCommand, isMstInfoCommand, handleMstApiCommand, isMstApiInfoCommand } = require('./src/bot/handlers/mstHandler');
 const { removeUserFromQueue } = require('./src/bot/queue')
 const { initBrowser, closeBrowser } = require('./src/bot/middleware/browserManager');
 
@@ -80,6 +80,7 @@ _Пример: web ogpo legal_ — для юридических лиц
 _Пример: web mst спорт 75+ 2_
 _Пример: web mst premium деловые 4-74 5_
 _web mst помощь_ — подсказка, _web mst тесты_ — что проверяется
+_api mst_ — МСТ напрямую в сервер: калькулятор и выписка (создаёт полисы), _api mst тесты_ — что проверяется
 
 \`web ns [стандарт|спорт] [взрослые|дети] [1–10]\` — через сайт (браузер)
 Выписать полис НС; сумму, срок, виды спорта и роли бот выбирает сам
@@ -124,7 +125,12 @@ bot.on(['text', 'photo', 'document'], async (ctx) => {
         if (isInfoCommand(nsArgs)) return handleNsCommand(ctx, 'api', nsArgs);
         return rateLimitMiddleware(ctx, () => handleNsCommand(ctx, 'api', nsArgs));
       }
-      return ctx.reply('Доступные команды:\n`api ns` — калькулятор и выписка через API (создаёт полисы)', { parse_mode: 'Markdown' });
+      if ((args[0] || '').toLowerCase() === 'mst') {
+        const mstArgs = args.slice(1);
+        if (isMstApiInfoCommand(mstArgs)) return handleMstApiCommand(ctx, mstArgs);
+        return rateLimitMiddleware(ctx, () => handleMstApiCommand(ctx, mstArgs));
+      }
+      return ctx.reply('Доступные команды:\n`api ns` — НС: калькулятор и выписка через API (создаёт полисы)\n`api mst` — МСТ: калькулятор и выписка через API (создаёт полисы)', { parse_mode: 'Markdown' });
     }
 
     case 'regress':

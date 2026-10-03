@@ -58,15 +58,16 @@ function tourist(ageCode, i) {
   const female = i % 2 === 1;
   const birthDate = birthDateForAge(AGES[ageCode][i], i * 15); // distinct birthdays -> distinct IINs
   const serial = SERIAL[ageCode] + i * 7;
+  const iin = generateIin(birthDate, female ? 'female' : 'male', serial);
   return {
-    iin: generateIin(birthDate, female ? 'female' : 'male', serial),
+    iin,
     birthDate,
     gender: female ? 'female' : 'male',
     lastName: female ? 'ТЕСТОВА' : 'ТЕСТОВ',
     firstName: CYRILLIC[i],
     lastNameLatin: female ? 'TESTOVA' : 'TESTOV',
     firstNameLatin: LATIN[i],
-    docNumber: `N${String(10000000 + (serial * 7919) % 89999999).slice(0, 8)}`,
+    docNumber: `N${iin.slice(-8)}`, // from the IIN: a fixed number would clash in ESBD with yesterday's person (kdp/save 503)
     docDate: addDays(tomorrowIso(), -31), // a month-old passport is valid for every age
   };
 }
@@ -150,4 +151,68 @@ async function mstDictionaries(variant = 'standard') {
   };
 }
 
-module.exports = { parseMstArgs, mstCase, mstDictionaries, touristsLabel, ruDate, MAX_TOURISTS };
+// ---------- `api mst`: calculator boundaries (never issue) ----------
+// patch(body, h): h.amount(code) — the first amount of that country's zone in this variant's dictionary,
+// h.otherZoneAmount(code) — an amount of another zone, h.standardAmount(code) — from the МСТ (not Premium) dictionary.
+// Base request: МСТ, Турция, 8 days from tomorrow, one tourist 4-74, tourism.
+
+const T = (age = 'adult', purpose = 'tourism', extra = {}) => ({ age_code: age, purpose, active_relax: false, covid_19: 0, ...extra });
+const SPORT = { sport: 'alpine_skiing', sport_level: 'amateur' };
+
+const calcCases = [
+  { id: 'MA01', rule: 'age-groups', title: 'Туризм, 4-74 лет, Турция, 8 дней', expect: 'ok', patch: () => {} },
+  { id: 'MA02', rule: 'age-groups', title: 'Возраст 0-3 года', expect: 'ok', patch: (b) => { b.insureds = [T('infant')]; } },
+  { id: 'MA03', rule: 'age-groups', title: 'Возраст свыше 75 лет', expect: 'ok', patch: (b) => { b.insureds = [T('elder')]; } },
+  { id: 'MA04', rule: 'age-groups', expectError: /age_code/, title: 'Неизвестная возрастная группа', expect: 'reject', patch: (b) => { b.insureds = [T('baby')]; } },
+  { id: 'MA05', rule: 'purpose-dictionary', title: 'Цель «Студенты»', expect: 'ok', patch: (b) => { b.insureds = [T('adult', 'student')]; } },
+  { id: 'MA06', rule: 'purpose-dictionary', title: 'Цель «Деловые поездки»', expect: 'ok', patch: (b) => { b.insureds = [T('adult', 'business')]; } },
+  { id: 'MA07', rule: 'purpose-dictionary', expectError: /purpose/, title: 'Неизвестная цель поездки', expect: 'reject', patch: (b) => { b.insureds = [T('adult', 'vacation')]; } },
+  { id: 'MA08', rule: 'sport-required', title: 'Спорт: горные лыжи, любительский', expect: 'ok', patch: (b) => { b.insureds = [T('adult', 'sport', SPORT)]; } },
+  { id: 'MA09', rule: 'sport-required', expectError: /sport/i, title: 'Спорт без вида и уровня спорта', expect: 'reject', patch: (b) => { b.insureds = [T('adult', 'sport')]; } },
+  { id: 'MA10', rule: 'sport-required', expectError: /sport/i, title: 'Спорт: несуществующий вид спорта', expect: 'reject', patch: (b) => { b.insureds = [T('adult', 'sport', { ...SPORT, sport: 'quidditch' })]; } },
+  { id: 'MA11', rule: 'sport-required', expectError: /sport/i, title: 'Спорт: несуществующий уровень спорта', expect: 'reject', patch: (b) => { b.insureds = [T('adult', 'sport', { ...SPORT, sport_level: 'wizard' })]; } },
+  { id: 'MA12', rule: 'tourists-min-1', expectError: /insureds/, title: '0 туристов', expect: 'reject', patch: (b) => { b.insureds = []; } },
+  { id: 'MA13', rule: 'tourists-max-5', title: '5 туристов (максимум формы)', expect: 'ok', patch: (b) => { b.insureds = Array.from({ length: 5 }, () => T()); } },
+  { id: 'MA14', rule: 'tourists-max-5', expectError: /insureds/, title: '6 туристов (больше максимума формы)', expect: 'reject', patch: (b) => { b.insureds = Array.from({ length: 6 }, () => T()); } },
+  { id: 'MA15', rule: 'amount-zone', expectError: /sum_insured/, title: 'Сумма из другой зоны (не для Турции)', expect: 'reject', patch: (b, h) => { b.sum_insured = h.otherZoneAmount('TUR').value; } },
+  { id: 'MA16', rule: 'amount-dictionary', expectError: /sum_insured/, title: 'Несуществующая сумма', expect: 'reject', patch: (b) => { b.sum_insured = 999; } },
+  { id: 'MA17', rule: 'country-dictionary', expectError: /destination|country|sum_insured/, title: 'Несуществующая страна', expect: 'reject', patch: (b) => { b.destinations = [{ country_code: 'XXX' }]; } },
+  { id: 'MA18', rule: 'no-home-country', expectError: /destination|country|sum_insured/, title: 'Страна поездки — Казахстан', expect: 'reject', patch: (b) => { b.destinations = [{ country_code: 'KAZ' }]; } },
+  { id: 'MA19', rule: 'destinations-required', expectError: /destination/, title: 'Без страны поездки', expect: 'reject', patch: (b) => { b.destinations = []; } },
+  { id: 'MA20', rule: 'multi-zone-amount', expectError: /sum_insured|zone/, title: 'Турция и Германия, сумма зоны Турции', expect: 'reject', patch: (b) => { b.destinations = [{ country_code: 'TUR' }, { country_code: 'DEU' }]; } },
+  { id: 'MA21', rule: 'start-not-past', expectError: /start/, title: 'Начало поездки в прошлом', expect: 'reject', patch: (b, h) => { b.period = { start_at: addDays(h.start, -10), end_at: addDays(h.start, -3) }; } },
+  { id: 'MA22', rule: 'period-consistent', expectError: /end_at|period/, title: 'Окончание раньше начала', expect: 'reject', patch: (b, h) => { b.period = { start_at: addDays(h.start, 10), end_at: addDays(h.start, 5) }; } },
+  { id: 'MA23', rule: 'period-max-365', title: 'Поездка 365 дней', expect: 'ok', patch: (b, h) => { b.period = { start_at: h.start, end_at: addDays(h.start, 364) }; } },
+  { id: 'MA24', rule: 'period-max-365', expectError: /period|365/, title: 'Поездка 366 дней', expect: 'reject', patch: (b, h) => { b.period = { start_at: h.start, end_at: addDays(h.start, 365) }; } },
+  { id: 'MA25', rule: 'tariff-dictionary', expectError: /tariff/, title: 'Неизвестный тариф', expect: 'reject', patch: (b) => { b.tariff = 'gold'; } },
+  { id: 'MA26', variant: 'premium', rule: 'purpose-dictionary', title: 'Premium: туризм', expect: 'ok', patch: () => {} },
+  { id: 'MA27', variant: 'premium', rule: 'age-groups', title: 'Premium: свыше 75 лет', expect: 'ok', patch: (b) => { b.insureds = [T('elder')]; } },
+  { id: 'MA28', variant: 'premium', rule: 'premium-no-student', expectError: /purpose/, title: 'Premium: цель «Студенты»', expect: 'reject', patch: (b) => { b.insureds = [T('adult', 'student')]; } },
+  { id: 'MA29', variant: 'premium', rule: 'tourists-max-5', expectError: /insureds/, title: 'Premium: 6 туристов', expect: 'reject', patch: (b) => { b.insureds = Array.from({ length: 6 }, () => T()); } },
+  { id: 'MA30', variant: 'premium', rule: 'amount-zone', expectError: /sum_insured/, title: 'Premium: сумма из справочника обычного МСТ', expect: 'reject', patch: (b, h) => { b.sum_insured = h.standardAmount('TUR').value; } },
+];
+
+// ---------- `api mst`: issuance straight through the API (every accepted request is a REAL policy) ----------
+// Base request: as the site sends it — МСТ, Турция, 8 days, tourism, the test client as the only tourist.
+// extra: made-up tourists saved first (kdp/save gives their ESBD client id). patch(body, h) as above.
+
+const issueApiCases = [
+  { id: 'MI01', title: 'API: МСТ, туризм, 1 турист, Турция, 8 дней', expect: 'issue' },
+  { id: 'MI02', title: 'API: МСТ, спорт (горные лыжи, любительский)', expect: 'issue', purpose: 'sport', sport: SPORT },
+  { id: 'MI03', title: 'API: МСТ Premium, туризм', expect: 'issue', variant: 'premium' },
+  { id: 'MI04', title: 'API: МСТ, деловая поездка, 2 туриста', expect: 'issue', purpose: 'business', extra: 1 },
+  { id: 'MI05', title: 'API: подмена премии в запросе игнорируется', expect: 'issue', patch: (b) => Object.assign(b, { total_premium: 1, premium: 1, total_premium_final: 1 }) },
+  { id: 'MI11', rule: 'amount-zone', expectError: /sum_insured|zone/, title: 'API: сумма из другой зоны отклоняется', expect: 'reject', patch: (b, h) => { b.sum_insured = h.otherZoneAmount('TUR').value; } },
+  { id: 'MI12', rule: 'no-duplicate-insured', expectError: /insured|duplicate|дубл/i, title: 'API: один турист дважды отклоняется', expect: 'reject', patch: (b) => { b.insureds = [b.insureds[0], { ...b.insureds[0] }]; b.insureds_count = 2; } },
+  { id: 'MI13', rule: 'insureds-count-match', expectError: /insureds_count/, title: 'API: число туристов не совпадает со списком', expect: 'reject', patch: (b) => { b.insureds_count = 3; } },
+  { id: 'MI14', rule: 'start-not-past', expectError: /start/, title: 'API: начало поездки в прошлом отклоняется', expect: 'reject', patch: (b, h) => Object.assign(b, { start_at: addDays(h.start, -10), end_at: addDays(h.start, -3) }) },
+  { id: 'MI15', rule: 'purpose-dictionary', expectError: /purpose/, title: 'API: неизвестная цель поездки отклоняется', expect: 'reject', patch: (b) => { b.purpose = 'vacation'; b.insureds.forEach((i) => { i.purpose = 'vacation'; }); } },
+  // a student document key is sent too, so that the refusal can only be about the purpose itself
+  { id: 'MI16', rule: 'premium-no-student', expectError: /insureds\.\d+\.purpose|purpose: (must|the selected)|selected insureds\.\d+\.purpose/i, title: 'API: Premium со студентами отклоняется', expect: 'reject', variant: 'premium', purpose: 'student', patch: (b) => { b.student_doc_key = 'qa-test-student-document'; } },
+  { id: 'MI17', rule: 'payment-dictionary', expectError: /payment/, title: 'API: неизвестный способ оплаты отклоняется', expect: 'reject', patch: (b) => { b.payment_method = 'bitcoin'; } },
+  { id: 'MI18', rule: 'tourists-min-1', expectError: /insureds/, title: 'API: без туристов отклоняется', expect: 'reject', patch: (b) => { b.insureds = []; b.insureds_count = 0; } },
+];
+
+module.exports = {
+  parseMstArgs, mstCase, mstDictionaries, touristsLabel, ruDate, tourist, MAX_TOURISTS, calcCases, issueApiCases,
+};

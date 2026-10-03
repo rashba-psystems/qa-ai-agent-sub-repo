@@ -1,5 +1,115 @@
 {
-  "_comment": "Настройки тестов МСТ: известные проблемы МСТ. Общее (тестовый клиент, ЕСБД, карточка) — в fixtures/insurance.json.",
+  "_comment": "Настройки тестов МСТ: правила из требований и известные проблемы МСТ. Общее (тестовый клиент, ЕСБД, карточка) — в fixtures/insurance.json.",
+  "requirements": {
+    "_comment": "Как в fixtures/ns.json: confirmed=true — правило из интерфейса/справочника или подтверждено аналитиком; неподтверждённое нарушение — «нужно решение», а не баг.",
+    "rules": {
+      "age-groups": {
+        "text": "Возраст туриста — одна из групп: 0-3 года, 4-74 лет, свыше 75 лет",
+        "confirmed": true,
+        "source": "справочник mst/schema → ages, интерфейс «Турист N»"
+      },
+      "purpose-dictionary": {
+        "text": "Цель поездки из справочника: туризм, спорт, студенты, деловые (в Premium — без студентов)",
+        "confirmed": true,
+        "source": "справочник mst/schema → trip_purposes"
+      },
+      "premium-no-student": {
+        "text": "В МСТ Premium нет цели «Студенты»",
+        "confirmed": true,
+        "source": "интерфейс МСТ Premium, справочник variant=premium"
+      },
+      "sport-required": {
+        "text": "Для цели «Спорт» обязательны вид и уровень спорта из справочника",
+        "confirmed": true,
+        "source": "интерфейс: поля «Вид спорта» и «Уровень спорта»"
+      },
+      "tourists-min-1": {
+        "text": "В полисе минимум один турист",
+        "confirmed": true,
+        "source": "интерфейс: список «Туристы» начинается с 1"
+      },
+      "tourists-max-5": {
+        "text": "Не больше 5 туристов",
+        "confirmed": false,
+        "source": "интерфейс: список «Туристы» до 5 — предположение, что это и ограничение сервера"
+      },
+      "amount-zone": {
+        "text": "Страховая сумма — из справочника зоны выбранной страны",
+        "confirmed": true,
+        "source": "справочник mst/schema → amounts (у каждой суммы своя зона)"
+      },
+      "amount-dictionary": {
+        "text": "Страховая сумма только из справочника",
+        "confirmed": true,
+        "source": "справочник mst/schema → amounts"
+      },
+      "country-dictionary": {
+        "text": "Страна поездки только из справочника",
+        "confirmed": true,
+        "source": "справочник mst/schema → countries"
+      },
+      "no-home-country": {
+        "text": "Казахстан нельзя выбрать страной поездки (МСТ — для выезжающих за рубеж)",
+        "confirmed": false,
+        "source": "предположение"
+      },
+      "destinations-required": {
+        "text": "Нужна хотя бы одна страна поездки",
+        "confirmed": true,
+        "source": "интерфейс: поле «Страна» обязательно"
+      },
+      "multi-zone-amount": {
+        "text": "Если страны из разных зон, сумма из зоны одной страны не подходит (или цена учитывает самую дорогую зону)",
+        "confirmed": false,
+        "source": "предположение"
+      },
+      "start-not-past": {
+        "text": "Дата начала поездки не раньше завтрашнего дня",
+        "confirmed": false,
+        "source": "предположение (сервер: «must be after today»)"
+      },
+      "period-consistent": {
+        "text": "Дата окончания не раньше даты начала",
+        "confirmed": true,
+        "source": "здравый смысл, интерфейс выбора дат"
+      },
+      "period-max-365": {
+        "text": "Однократная поездка — не дольше 365 дней",
+        "confirmed": false,
+        "source": "сообщение сервера «Maximum insurance period is 365 days»"
+      },
+      "tariff-dictionary": {
+        "text": "Тариф только из списка (base, multitrip)",
+        "confirmed": true,
+        "source": "справочник mst/schema"
+      },
+      "no-duplicate-insured": {
+        "text": "Один человек не может быть в полисе дважды",
+        "confirmed": false,
+        "source": "предположение"
+      },
+      "insureds-count-match": {
+        "text": "Число туристов в заявке (insureds_count) равно длине списка туристов",
+        "confirmed": false,
+        "source": "предположение"
+      },
+      "payment-dictionary": {
+        "text": "Способ оплаты только из списка окна оплаты",
+        "confirmed": true,
+        "source": "окно «Способ оплаты»"
+      },
+      "errors-russian": {
+        "text": "Сообщения об ошибках на русском языке",
+        "confirmed": false,
+        "source": "предположение"
+      },
+      "errors-format": {
+        "text": "Сервер отказывает одним способом: 4xx с полем errors",
+        "confirmed": false,
+        "source": "предположение"
+      }
+    }
+  },
   "knownIssues": {
     "_comment": "Как в fixtures/ns.json: title — для команды, plain — простыми словами для отчёта, match — по каким проверкам бот узнаёт проблему.",
     "issues": []

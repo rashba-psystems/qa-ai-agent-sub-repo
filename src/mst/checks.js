@@ -166,4 +166,4 @@ const MST_KIT = {
   ],
 };
 
-module.exports = { MST_KIT, compareMstBody };
+module.exports = { MST_KIT, compareMstBody, contractChecks };

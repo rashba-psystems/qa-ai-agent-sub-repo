@@ -105,7 +105,7 @@ async function handleNsCommand(ctx, prefix, args = []) {
         for (const chunk of splitIntoChunks(await testList(prefix))) await ctx.reply(chunk);
         return undefined;
     }
-    if (sub === 'журнал') return journalReply(ctx, prefix);
+    if (sub === 'журнал') return journalReply(ctx, prefix, prefix === 'api' ? 'ns' : undefined);
     if (sub === 'снять') return releaseReply(ctx, args[1], `${prefix} ns`);
 
     let job = null;

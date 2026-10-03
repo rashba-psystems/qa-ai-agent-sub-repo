@@ -41,6 +41,28 @@ function eq(name, actual, expected, opts = {}) {
   return check(name, actual === expected, expected, actual, opts);
 }
 
+// Checks against a product's requirements (fixtures/<product>.json → requirements):
+//   byRule — a broken CONFIRMED rule is a bug, an unconfirmed one needs a decision
+//   refusalChecks — a refusal counts only when it names what the case broke; otherwise the rule stays unverified
+//     (detail — what happened, «422: …»; reason — the server's error text)
+function makeRules(rules, file) {
+  function byRule(ruleId, name, ok, expected, actual, axis = 'ui') {
+    const r = rules[ruleId];
+    if (!r) throw new Error(`Нет правила ${ruleId} в ${file}`);
+    return check(name, ok, expected, actual, { axis, rule: ruleId, severity: r.confirmed ? 'bug' : 'note', unconfirmed: !r.confirmed });
+  }
+  function refusalChecks(c, detail, reason) {
+    if (c.expectError && !c.expectError.test(reason || '')) {
+      return [
+        unverified(c.title, 'отказ по правилу', `отказ по другой причине (${detail.slice(0, 180)})`, 'ui'),
+        check('Отказ по ожидаемой причине', false, String(c.expectError), (reason || '(без текста)').slice(0, 200), { axis: 'ui' }),
+      ];
+    }
+    return [byRule(c.rule, c.title, true, 'отказ', detail.slice(0, 220), 'ui')];
+  }
+  return { byRule, refusalChecks };
+}
+
 const STATUS_ORDER = ['error', 'fail', 'attention', 'pass'];
 
 // Integration and tariff axes are informational: they never change the status
@@ -168,6 +190,6 @@ const LATIN_ONLY = /^[^А-Яа-яЁё]*[A-Za-z][^А-Яа-яЁё]*$/;
 const isEnglish = (s) => !!s && LATIN_ONLY.test(s);
 
 module.exports = {
-  check, unverified, eq, statusOf, worstStatus, addDays, addMonths, expectedEnd, tomorrowIso,
+  check, unverified, eq, makeRules, statusOf, worstStatus, addDays, addMonths, expectedEnd, tomorrowIso,
   hasDocNumber, shownCheck, cardChecks, integrationChecks, anomalyChecks, isEnglish,
 };

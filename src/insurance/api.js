@@ -27,7 +27,8 @@ function errorText(data) {
   if (data.errors && typeof data.errors === 'object') {
     for (const [k, v] of Object.entries(data.errors)) parts.push(`${k}: ${Array.isArray(v) ? v.join(', ') : v}`);
   }
-  return parts.filter(Boolean).join('; ');
+  // a nested answer (e.g. «calculate: nomad returned 422: {…}») keeps its Cyrillic as \uXXXX escapes
+  return parts.filter(Boolean).join('; ').replace(/\\+u([0-9a-fA-F]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16))).replace(/\\+"/g, '"');
 }
 
 // The first human-readable error message (for the language check)

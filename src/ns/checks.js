@@ -3,30 +3,13 @@
 // NS checks: rules from the requirements (fixtures/ns.json → requirements), tariffs, the contract, the calculation,
 // and NS_KIT — what an NS purchase expects and checks. The check model and shared checks: src/insurance/checks.js.
 
-const { check, unverified, eq, cardChecks, expectedEnd, tomorrowIso } = require('../insurance/checks');
+const { check, unverified, eq, cardChecks, expectedEnd, tomorrowIso, makeRules } = require('../insurance/checks');
 const { parseMoney } = require('../insurance/flow');
 const { ROLE_CODES, countLabel } = require('./cases');
 const { client } = require('../insurance/purchase');
 const { tariffs, requirements: { rules } } = require('../../fixtures/ns.json');
 
-// A check that enforces a rule from fixtures/ns.json → requirements: a bug only if the rule is confirmed
-function byRule(ruleId, name, ok, expected, actual, axis = 'ui') {
-  const r = rules[ruleId];
-  if (!r) throw new Error(`Нет правила ${ruleId} в fixtures/ns.json → requirements`);
-  return check(name, ok, expected, actual, { axis, rule: ruleId, severity: r.confirmed ? 'bug' : 'note', unconfirmed: !r.confirmed });
-}
-
-// A refusal counts only when it names what the case broke. Otherwise the rule stays unverified.
-//   detail — what happened ("422: ..."), reason — the server's error text
-function refusalChecks(c, detail, reason) {
-  if (c.expectError && !c.expectError.test(reason || '')) {
-    return [
-      unverified(c.title, 'отказ по правилу', `отказ по другой причине (${detail.slice(0, 180)})`, 'ui'),
-      check('Отказ по ожидаемой причине', false, String(c.expectError), (reason || '(без текста)').slice(0, 200), { axis: 'ui' }),
-    ];
-  }
-  return [byRule(c.rule, c.title, true, 'отказ', detail.slice(0, 220), 'ui')];
-}
+const { byRule, refusalChecks } = makeRules(rules, 'fixtures/ns.json → requirements');
 
 // ---------- premium ----------
 

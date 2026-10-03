@@ -10,11 +10,12 @@ const { summaryText, headline, photos } = require('../../insurance/report');
 const lower = (args) => args.map((a) => String(a).toLowerCase().replace(/ё/g, 'е'));
 
 // Both handlers accept the release command; the API journal belongs to `api ns`
-const releaseCommand = (channel, e) => (channel === 'api' ? 'api ns снять' : e.product === 'mst' ? 'web mst снять' : 'web ns снять');
+const releaseCommand = (channel, e) => `${channel} ${e.product === 'mst' ? 'mst' : 'ns'} снять`;
 
 // `… журнал` — open issuance attempts of this channel: 'web' (НС and МСТ through the site) or 'api'; a corrupt file is shown everywhere
-async function journalReply(ctx, channel) {
-    const open = (await journal.pending()).filter((e) => e.state === 'corrupt' || e.channel === channel);
+// product: for 'api' only that product's attempts; the site journal is shared by all products
+async function journalReply(ctx, channel, product) {
+    const open = (await journal.pending()).filter((e) => e.state === 'corrupt' || (e.channel === channel && (!product || (e.product || 'ns') === product)));
     if (!open.length) return ctx.reply(`Незавершённых заявок (${channel}) нет — выписки не заблокированы.`);
     const lines = ['Незавершённые заявки (проверяю их текущий статус):', ''];
     for (const e of open) {

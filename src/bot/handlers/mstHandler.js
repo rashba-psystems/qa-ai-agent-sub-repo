@@ -4,14 +4,19 @@
 //   web mst [туризм|спорт|студенты|деловые] [0-3|4-74|75+] [1–5]      — a purchase through the site, always issued
 //   web mst premium [туризм|спорт|деловые] [0-3|4-74|75+] [1–5]       — the same for МСТ Premium
 //   web mst помощь / тесты / журнал / снять <id>
+//   api mst                                                         — calculator boundaries (MA) + issuance straight to the server (MI)
+//   api mst помощь / тесты / журнал / снять <id>
 // Country, amount, dates, sport type and level are picked by the bot.
 
 const { enqueuePlaywrightTask } = require('../queue');
+const { splitIntoChunks } = require('../../reporter/formatter');
 const { runWebPurchase, client } = require('../../insurance/purchase');
 const { MstFlow } = require('../../mst/flow');
 const { MST_KIT } = require('../../mst/checks');
-const { parseMstArgs, mstCase, mstDictionaries, MAX_TOURISTS } = require('../../mst/cases');
-const { journalReply, releaseReply, runJob, lower, isInfo } = require('./insurance');
+const { parseMstArgs, mstCase, mstDictionaries, MAX_TOURISTS, calcCases, issueApiCases } = require('../../mst/cases');
+const { runApiSuite } = require('../../mst/api');
+const journal = require('../../insurance/journal');
+const { journalReply, releaseReply, runJob, lower, plural, isInfo } = require('./insurance');
 
 const MST_HELP = [
     'web mst — выписать полис МСТ через сайт; web mst premium — МСТ Premium. Можно указать:',
@@ -63,4 +68,42 @@ async function handleMstCommand(ctx, args = []) {
 
 const isMstInfoCommand = (args) => isInfo(['premium', 'премиум'].includes(lower(args)[0] || '') ? args.slice(1) : args);
 
-module.exports = { handleMstCommand, isMstInfoCommand };
+// ---------- api mst ----------
+
+const API_HELP = [
+    'api mst — калькулятор МСТ и Premium (MA01–MA30, полисы не создаются) и выписка напрямую через сервер (MI01–MI18, создаёт полисы)',
+    'api mst тесты — что именно проверяется',
+    'api mst журнал — незавершённые заявки МСТ через API; api mst снять <id> — снять блокировку',
+].join('\n');
+
+async function apiTestList() {
+    const blocked = (await journal.pending()).filter((e) => e.channel === 'api' && e.product === 'mst' && e.state !== 'corrupt').map((e) => e.caseId);
+    const short = (t) => t.replace(/^API: /, '').replace(/\s*—?\s*отклоняется$/, '');
+    return [
+        `api mst — калькулятор — ${plural(calcCases.length, ['проверка', 'проверки', 'проверок'])}, полис не создаётся:`,
+        ...calcCases.map((c) => `${c.id} ${c.variant === 'premium' ? '' : 'МСТ: '}${c.title} → ${c.expect === 'ok' ? 'должен посчитать' : 'должен отказать'}`),
+        'В конце — общие наблюдения: язык ошибок, один способ отказа, одинаковая цена на одинаковый запрос.',
+        '',
+        `api mst — выписка через сервер — ${plural(issueApiCases.length, ['заявка', 'заявки', 'заявок'])}:`,
+        ...issueApiCases.map((c) => `${c.id} ${short(c.title)} → ${c.expect === 'issue' ? 'должен выписать полис' : 'должен отказать'}`),
+        blocked.length ? `\nСейчас пропускаются (сервер не ответил на прошлую заявку): ${[...new Set(blocked)].sort().join(', ')} — подробнее: api mst журнал` : null,
+    ].filter((x) => x !== null).join('\n');
+}
+
+// args: words after «api mst»
+async function handleMstApiCommand(ctx, args = []) {
+    const sub = lower(args)[0] || '';
+    if (['помощь', 'help', '?'].includes(sub)) return ctx.reply(API_HELP);
+    if (['тесты', 'список', 'tests'].includes(sub)) {
+        for (const chunk of splitIntoChunks(await apiTestList())) await ctx.reply(chunk);
+        return undefined;
+    }
+    if (sub === 'журнал') return journalReply(ctx, 'api', 'mst');
+    if (sub === 'снять') return releaseReply(ctx, args[1], 'api mst');
+    if (args.length) return ctx.reply(`Неизвестная команда «api mst ${args.join(' ')}».\n\n${API_HELP}`);
+    const job = { title: 'МСТ через API: калькулятор и выписка', run: (onProgress) => runApiSuite({ onProgress }) };
+    await ctx.reply(['🤖 МСТ через API: калькулятор и выписка', `Тестовый клиент: ${client.fullName} (ИИН ${client.iin})`, '⚠️ Будут выписаны реальные полисы на dev'].join('\n'));
+    return enqueuePlaywrightTask(ctx, () => runJob(ctx, job));
+}
+
+module.exports = { handleMstCommand, isMstInfoCommand, handleMstApiCommand, isMstApiInfoCommand: isInfo };
