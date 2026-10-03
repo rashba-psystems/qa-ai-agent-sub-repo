@@ -110,6 +110,30 @@ async function waitEsbd(contractNumber, timeoutMs = 20000) {
 
 const findContracts = (iin, product) => listContracts({ product, search: iin, perPage: 10 });
 
+// Saves a person in ESBD as the site does before issuing (kdp/save -> the ESBD client id). МСТ needs the passport
+// as the document: the shared test client may last have been saved with the ID card (by another product) —
+// then the server refuses with «тип документа должен быть "rk_passport", получен "rk_id"». The stand sometimes
+// answers 503 here, so up to three tries.
+async function saveClient(p) {
+  const ru = (iso) => iso.split('-').reverse().join('.');
+  const body = {
+    id: p.id || 0, resident_bool: 1, born: ru(p.born), document_type: 'rk_passport', document_number: p.docNumber, document_date: ru(p.docDate),
+    document_issued_by: p.issuedBy, first_name: p.firstName, last_name: p.lastName, iin: p.iin, first_name_eng: p.firstNameLatin,
+    last_name_eng: p.lastNameLatin, ...(p.address ? { address: p.address } : {}),
+  };
+  let res = null;
+  let failure = '';
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    res = await apiCall('POST', `${BASE}/kdp/save`, body).catch((e) => ({ status: 0, data: { message: e.message } }));
+    const id = res.data && res.data.data && res.data.data.client_id;
+    if (id) return id;
+    failure = `kdp/save ${res.status || 'нет ответа'}: ${errorText(res.data).slice(0, 120)}`;
+    if (res.status >= 400 && res.status < 500) break;
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+  throw new Error(`клиент ${p.iin} не сохранён в ЕСБД (${failure})`);
+}
+
 module.exports = {
-  BASE, errorText, firstMessage, isFinal, processStatus, pollProcess, contractById, integrations, waitEsbd, findContracts,
+  BASE, errorText, firstMessage, isFinal, processStatus, pollProcess, contractById, integrations, waitEsbd, findContracts, saveClient,
 };

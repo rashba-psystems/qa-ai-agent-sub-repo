@@ -9,7 +9,7 @@
 const { apiRequest } = require('../ndp/client');
 const { BASE } = require('../insurance/api');
 const { addDays, tomorrowIso } = require('../insurance/checks');
-const { generateIin, birthDateForAge } = require('../insurance/purchase');
+const { generateIin, birthDateForAge, child, childDocument } = require('../insurance/purchase');
 
 const plural = (n, [one, few, many]) => {
   const t = n % 10, h = n % 100;
@@ -72,10 +72,18 @@ function tourist(ageCode, i) {
   };
 }
 
-// The holder (the GBD test person, 44) is a tourist only in the 4-74 group; otherwise every tourist is made up
+// The test child from fixtures/insurance.json (9 years — the 4-74 group), as the form fills a tourist
+const testChild = () => ({
+  iin: child.iin, birthDate: child.born_date, gender: child.gender, lastName: child.last_name, firstName: child.first_name,
+  lastNameLatin: child.last_name_eng, firstNameLatin: child.first_name_eng, docNumber: child.document_number, docDate: child.document_date,
+  documentFile: childDocument() || undefined, // the scan is attached when it is here; otherwise manual entry
+});
+
+// The holder (the GBD test person, 44) is a tourist only in the 4-74 group, with the test child as tourist #2;
+// otherwise every tourist is made up
 function touristsFor(ageCode, count) {
-  const own = ageCode === 'adult' ? 1 : 0;
-  return Array.from({ length: count - own }, (_, i) => tourist(ageCode, i + own));
+  if (ageCode !== 'adult') return Array.from({ length: count }, (_, i) => tourist(ageCode, i));
+  return [...(count >= 2 ? [{ ...testChild(), fallback: tourist('adult', 1) }] : []), ...Array.from({ length: Math.max(0, count - 2) }, (_, i) => tourist('adult', i + 2))];
 }
 
 // ---------- the purchase: what was asked + what the bot picks ----------
@@ -201,6 +209,7 @@ const issueApiCases = [
   { id: 'MI02', title: 'API: МСТ, спорт (горные лыжи, любительский)', expect: 'issue', purpose: 'sport', sport: SPORT },
   { id: 'MI03', title: 'API: МСТ Premium, туризм', expect: 'issue', variant: 'premium' },
   { id: 'MI04', title: 'API: МСТ, деловая поездка, 2 туриста', expect: 'issue', purpose: 'business', extra: 1 },
+  { id: 'MI06', title: 'API: МСТ, туризм, страхователь и ребёнок 9 лет', expect: 'issue', withChild: true },
   { id: 'MI05', title: 'API: подмена премии в запросе игнорируется', expect: 'issue', patch: (b) => Object.assign(b, { total_premium: 1, premium: 1, total_premium_final: 1 }) },
   { id: 'MI11', rule: 'amount-zone', expectError: /sum_insured|zone/, title: 'API: сумма из другой зоны отклоняется', expect: 'reject', patch: (b, h) => { b.sum_insured = h.otherZoneAmount('TUR').value; } },
   { id: 'MI12', rule: 'no-duplicate-insured', expectError: /insured|duplicate|дубл/i, title: 'API: один турист дважды отклоняется', expect: 'reject', patch: (b) => { b.insureds = [b.insureds[0], { ...b.insureds[0] }]; b.insureds_count = 2; } },

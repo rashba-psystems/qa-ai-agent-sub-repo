@@ -302,4 +302,4 @@ async function runApiSuite({ onProgress = async () => {} } = {}) {
   return results;
 }
 
-module.exports = { runApiSuite, nsDictionaries, sportCodeMap, calcPreview, buildPolicyBody };
+module.exports = { runApiSuite, runIssueCase, nsDictionaries, sportCodeMap, calcPreview, buildPolicyBody };

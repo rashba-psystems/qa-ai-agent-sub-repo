@@ -5,12 +5,20 @@
 // What a product expects and checks comes in as a «kit» (src/<product>/checks.js).
 // Also here: the issuance journal check before a run, and IIN generation for made-up people.
 
+const fs = require('fs');
+const path = require('path');
 const { chromium } = require('playwright');
 const { FlowError, BASE_URL } = require('./flow');
 const { check, unverified, eq, statusOf, integrationChecks, anomalyChecks } = require('./checks');
 const { pollProcess, contractById, waitEsbd } = require('./api');
 const journal = require('./journal');
-const { client } = require('../../fixtures/insurance.json');
+const { client, child } = require('../../fixtures/insurance.json');
+
+// The test child's passport scan (fixtures/insurance.json → child.document_file), or null when it is not on this machine
+function childDocument() {
+  const file = child.document_file && path.resolve(__dirname, '../..', child.document_file);
+  return file && fs.existsSync(file) ? file : null;
+}
 
 const cardUrl = (policyId) => `${BASE_URL}/policies/${policyId}`;
 
@@ -20,6 +28,27 @@ function stopReason(checks, step) {
   const k = checks.find((x) => x.axis === 'issue' && x.ok !== true);
   const what = k.ok === null ? `${k.name} — ${String(k.actual).replace(/^не удалось проверить: /, '')}` : `${k.name}: ожидалось ${k.expected}, а на деле ${k.actual}`;
   return `${step}: ${what} — выписка не запускалась`;
+}
+
+// A person entered from a document scan: the site's recognition, field by field. The bot has already put the
+// right values in and gone on; each recognition error is still reported (a birth/issue date swap as one error).
+function recognitionChecks(person, ins) {
+  if (!person.documentFile || !ins.manual) return [];
+  const m = ins.manual;
+  if (!m.ocrMismatches) return [check('Документ распознан сайтом', false, 'поля заполнены по скану', m.via || 'нет', { severity: 'note' })];
+  if (!m.ocrMismatches.length) return [check('Распознавание документа: все поля верны', true, 'как в документе', 'как в документе')];
+  const out = [];
+  const list = [...m.ocrMismatches];
+  const birth = list.find((w) => w.field === 'дата рождения');
+  const issue = list.find((w) => w.field === 'дата выдачи');
+  if (birth && issue && birth.got === issue.want && issue.got === birth.want) {
+    out.push(check('Распознавание документа: перепутаны дата рождения и дата выдачи', false,
+      `рождение ${birth.want}, выдача ${issue.want}`, `рождение ${birth.got}, выдача ${issue.got}`));
+    list.splice(list.indexOf(birth), 1);
+    list.splice(list.indexOf(issue), 1);
+  }
+  for (const w of list) out.push(check(`Распознавание документа: ${w.field}`, false, w.want, w.got));
+  return out;
 }
 
 // A purchase through the site: pays cash and verifies the result.
@@ -45,18 +74,38 @@ async function runPurchase(flow, c, kit) {
   if (holder.esbdErrors) checks.push(check('ЕСБД сохраняет клиента с первого раза', false, '0 повторов', `${holder.esbdErrors} повтора`, { severity: 'note', axis: 'anomaly' }));
   if (!holder.ok) throw new FlowError('holder', holder.error);
 
-  for (const person of c.insureds || []) {
-    let ins;
+  const addOne = async (person) => {
     try {
-      ins = await flow.addInsured(person);
+      return await flow.addInsured(person);
     } catch (e) {
       if (!(e instanceof FlowError)) throw e;
-      ins = await flow.addInsured(person, { addSlot: true });
+      return flow.addInsured(person, { addSlot: true });
+    }
+  };
+  const failed = (ins) => ins.ok === false || (ins.manual && !ins.manual.ok);
+  const why = (ins) => (ins.manual && ins.manual.error) || ins.error || ins.lookup;
+  for (const [idx, original] of (c.insureds || []).entries()) {
+    let person = original;
+    const marks = { http: flow.monitor.httpErrors.length, console: flow.monitor.consoleErrors.length };
+    let ins = await addOne(person);
+    checks.push(...recognitionChecks(person, ins));
+    // the test child is in ESBD but not in GBD: if the site cannot save her, that is the finding — a made-up
+    // person takes her place so the purchase still goes on
+    if (failed(ins) && person.fallback) {
+      checks.push(check('Человек из ЕСБД, которого нет в ГБД, сохраняется на сайте', false, 'сохранён', `${person.iin}: ${why(ins)}`));
+      // the failed saves of this attempt are this finding, not stand noise
+      const noise = (s) => /kdp\/save|status of 503/.test(s);
+      flow.monitor.httpErrors.splice(marks.http, Infinity, ...flow.monitor.httpErrors.slice(marks.http).filter((e) => !noise(e.url)));
+      flow.monitor.consoleErrors.splice(marks.console, Infinity, ...flow.monitor.consoleErrors.slice(marks.console).filter((e) => !noise(e)));
+      await flow.abandonPerson(person.iin);
+      person = person.fallback;
+      c.insureds[idx] = person;
+      Object.assign(exp, kit.expectations(c));
+      ins = await addOne(person);
+      checks.push(...recognitionChecks(person, ins));
     }
     if (ins.esbdErrors) checks.push(check('ЕСБД сохраняет застрахованного с первого раза', false, '0 повторов', `${ins.esbdErrors} повтора`, { severity: 'note', axis: 'anomaly' }));
-    if (ins.ok === false || (ins.manual && !ins.manual.ok)) {
-      throw new FlowError('insured', `застрахованный ${person.iin} не добавлен: ${(ins.manual && ins.manual.error) || ins.error || ins.lookup}`);
-    }
+    if (failed(ins)) throw new FlowError('insured', `застрахованный ${person.iin} не добавлен: ${why(ins)}`);
   }
 
   if (!(await flow.toStep3())) {
@@ -295,5 +344,5 @@ function withBadChecksum(iin) {
 
 module.exports = {
   runPurchase, runScenario, runWebPurchase, launchBrowser, recoverJournal, cardUrl, CARD_FIELDS,
-  generateIin, birthDateForAge, withBadChecksum, client,
+  generateIin, birthDateForAge, withBadChecksum, client, child, childDocument,
 };

@@ -442,7 +442,7 @@ class PurchaseFlow {
     let manual = null;
 
     if (lookup === 'not_found') {
-      manual = await this.fillManual(person);
+      manual = person.documentFile ? await this.fillFromDocument(person) : await this.fillManual(person);
       if (!manual.ok) return { lookup, manual };
     }
 
@@ -458,6 +458,96 @@ class PurchaseFlow {
     }
     await page.waitForTimeout(800);
     return { lookup, manual, ok: true };
+  }
+
+  // «Приложить документ» in the client window: the site reads the scan (OCR) and fills the person.
+  // Not recognised -> the site offers manual entry, and the product's fillManual takes over.
+  async fillFromDocument(person) {
+    const ocr = await this.attachDocument(person.documentFile);
+    if (ocr.ok) {
+      const ocrMismatches = await this.correctFilledFields(person);
+      const confirm = await this.confirmClientModal();
+      return { ...confirm, via: 'скан документа', ocrMismatches };
+    }
+    const manual = await this.fillManual(person);
+    return { ...manual, via: `вручную — скан не распознан (${ocr.reason})` };
+  }
+
+  async attachDocument(file) {
+    const page = this.page;
+    this.monitor.step('document');
+    const modal = this.clientModal();
+    const [chooser] = await Promise.all([
+      page.waitForEvent('filechooser', { timeout: 10000 }),
+      modal.getByText('Приложить документ', { exact: true }).first().click({ force: true }),
+    ]).catch(() => [null]);
+    if (!chooser) return { ok: false, reason: 'нет кнопки «Приложить документ»' };
+    await chooser.setFiles(file);
+    await modal.getByText(require('path').basename(file)).first().waitFor({ state: 'visible', timeout: 15000 }).catch(() => {});
+    await modal.locator('button', { hasText: 'Далее' }).first().click();
+    // success: the same window says «Мы автоматически заполнили поля…» with the fields filled;
+    // failure: a «Не удалось распознать данные» window offering manual entry
+    const failed = page.getByRole('dialog', { name: 'Не удалось распознать данные' });
+    for (const end = Date.now() + 40000; Date.now() < end;) {
+      if ((await modal.innerText().catch(() => '')).includes('автоматически заполнили')) return { ok: true };
+      if (await failed.isVisible().catch(() => false)) {
+        await failed.locator('button', { hasText: 'Ввести вручную' }).first().click();
+        await failed.waitFor({ state: 'hidden', timeout: 10000 }).catch(() => {});
+        return { ok: false, reason: 'сайт не распознал документ' };
+      }
+      await page.waitForTimeout(500);
+    }
+    return { ok: false, reason: 'распознавание не ответило за 40 с' };
+  }
+
+  // After recognition: every filled field vs what the person really has; wrong ones are put right (so the policy
+  // carries true data) and returned as [{ field, got, want }] — each is a recognition error
+  async correctFilledFields(person) {
+    const ru = (iso) => (iso ? iso.split('-').reverse().join('.') : undefined);
+    const want = {
+      'Фамилия на русском': person.lastName, 'Имя на русском': person.firstName,
+      'Фамилия на латинице': person.lastNameLatin, 'Имя на латинице': person.firstNameLatin,
+      'Дата рождения': ru(person.birthDate), 'Номер документа': person.docNumber, 'Дата выдачи': ru(person.docDate),
+    };
+    const modal = this.clientModal();
+    const fields = await modal.evaluate((root) => [...root.querySelectorAll('input')].filter((e) => e.offsetParent).map((e) => {
+      let label = '';
+      for (let p = e.parentElement; p && !label; p = p.parentElement) {
+        const l = [...p.querySelectorAll('span, label, p')].find((x) => !x.contains(e) && x.innerText.trim() && x.innerText.trim().length < 60);
+        if (l) label = l.innerText.trim().replace(/\s*\*$/, '');
+      }
+      return { label, value: e.value };
+    }));
+    const inputs = modal.locator('input:visible');
+    const wrong = [];
+    for (const [i, f] of fields.entries()) {
+      const w = want[f.label];
+      if (!w || String(f.value).trim().toUpperCase() === String(w).toUpperCase()) continue;
+      wrong.push({ field: f.label.toLowerCase(), got: f.value || '(пусто)', want: w });
+      await inputs.nth(i).fill(w);
+    }
+    return wrong;
+  }
+
+  // A person who could not be saved: close the window and empty their IIN field, so someone else can take the slot
+  async abandonPerson(iin) {
+    const page = this.page;
+    const modal = this.clientModal();
+    if (await modal.isVisible().catch(() => false)) {
+      await page.keyboard.press('Escape').catch(() => {});
+      const closed = await modal.waitFor({ state: 'hidden', timeout: 3000 }).then(() => true, () => false);
+      if (!closed) {
+        await modal.locator('button[aria-label="Close"], button[aria-label="Закрыть"]').first().click({ timeout: 3000 }).catch(() => {});
+        await modal.waitFor({ state: 'hidden', timeout: 3000 }).catch(() => {});
+      }
+    }
+    const inputs = page.locator('input[placeholder="Введите ИИН"]');
+    for (let i = 0, n = await inputs.count(); i < n; i++) {
+      if ((await inputs.nth(i).inputValue().catch(() => '')) === iin) {
+        await inputs.nth(i).fill('');
+        break;
+      }
+    }
   }
 
   async insuredNames() {

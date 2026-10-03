@@ -4,6 +4,7 @@ playwright-report
 test-results
 reports
 data/insurance-runs
+data/documents
 traces
 screenshots
 .DS_Store

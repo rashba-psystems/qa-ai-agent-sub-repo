@@ -8,7 +8,7 @@
 //     every issuance request the server accepts is a REAL policy
 
 const { addDays } = require('../insurance/checks');
-const { generateIin, birthDateForAge, client } = require('../insurance/purchase');
+const { generateIin, birthDateForAge, client, child, childDocument } = require('../insurance/purchase');
 
 // ---------- made-up people, entered by hand on the form (only one test person exists in GBD) ----------
 
@@ -27,7 +27,8 @@ function syntheticPerson(age, { gender = 'male', lastName = 'ТЕСТОВ', firs
     // yesterday's person (ESBD then answers kdp/save with 503)
     docNumber: iin.slice(-9),
     docDate: birthDateForAge(Math.min(age, 2)),
-    docTypes: ['Свидетельство о рождении', 'Удостоверение личности'],
+    // the form's list says «Свидетельство о рождении ребенка»; ESBD refuses a child's ID card (with 503)
+    docTypes: age < 16 ? ['Свидетельство о рождении ребенка', 'Свидетельство о рождении'] : ['Удостоверение личности'],
   };
 }
 
@@ -37,10 +38,27 @@ const CHILD_AGES = [5, 8, 11, 14, 17, 3, 6, 9, 12, 15];
 
 const ORDINALS = ['ПЕРВЫЙ', 'ВТОРОЙ', 'ТРЕТИЙ', 'ЧЕТВЕРТЫЙ', 'ПЯТЫЙ', 'ШЕСТОЙ', 'СЕДЬМОЙ', 'ВОСЬМОЙ', 'ДЕВЯТЫЙ', 'ДЕСЯТЫЙ'];
 
-// adults: the test client is insured #1, the rest are made up; children: every insured is a made-up child
+// The test child (fixtures/insurance.json → child): not in GBD, so the form asks for her data — the bot attaches
+// her passport scan and the site reads it (the NS manual form has no Latin name fields that a passport needs)
+const testChild = (documentFile) => ({
+  iin: child.iin, birthDate: child.born_date, gender: child.gender, lastName: child.last_name, firstName: child.first_name,
+  docNumber: child.document_number, docDate: child.document_date, docTypes: ['Паспорт'], documentFile,
+});
+
+// adults: the test client is insured #1, the rest are made up;
+// children: the test child is #1 when her scan is on this machine, the rest are made up
 function extraPeople(contractType, count) {
   const children = contractType === 'children';
-  return Array.from({ length: children ? count : count - 1 }, (_, i) => {
+  const scan = children ? childDocument() : null;
+  if (scan) return [{ ...testChild(scan), fallback: madeUp('children', 1, 0)[0] }, ...madeUp('children', count - 1, 1)];
+  return madeUp(contractType, children ? count : count - 1, children ? 0 : 1);
+}
+
+// n made-up people starting at position `first` (so a fallback and the rest never share an IIN)
+function madeUp(contractType, n, first) {
+  const children = contractType === 'children';
+  return Array.from({ length: n }, (_, k) => {
+    const i = k + (children ? first : first - 1);
     const female = i % 2 === 1;
     return syntheticPerson(children ? CHILD_AGES[i] : ADULT_AGES[i], {
       gender: female ? 'female' : 'male',
@@ -198,6 +216,8 @@ const issueApiCases = [
   { id: 'I01', title: 'API: Стандарт, взрослый, 1 млн, 12 мес', expect: 'issue' },
   { id: 'I02', title: 'API: Стандарт, 3,5 млн, 5 дней', expect: 'issue', amountValue: 3500000, days: 5 },
   { id: 'I03', title: 'API: Спорт, спортсмен, футбол, 2 млн, 12 мес', expect: 'issue', variant: 'sport', amountValue: 2000000, sportCodes: ['football'] },
+  { id: 'I05', title: 'API: Дети, ребёнок 9 лет, 1 млн, 12 мес', expect: 'issue', contractType: 'children',
+    insureds: [(({ esbd_client_id, iin, first_name, last_name, born_date, document_type, document_number, document_date, document_issued_by }) => ({ esbd_client_id, iin, first_name, last_name, born_date, document_type, document_number, document_date, document_issued_by }))(child)] },
   { id: 'I04', title: 'API: подмена премии в запросе игнорируется', expect: 'issue',
     patch: (b) => Object.assign(b, { total_premium: 1, premium: 1, total_premium_final: 1 }) },
   { id: 'I11', rule: 'start-not-past', expectError: /start|period/, title: 'API: период с началом в прошлом отклоняется', expect: 'reject',

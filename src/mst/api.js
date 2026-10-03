@@ -4,10 +4,10 @@
 // with the requests the site makes (MI01–MI18: every request the server accepts is a REAL policy). МСТ and Premium.
 
 const { apiCall } = require('../ndp/client');
-const { BASE, errorText, firstMessage, pollProcess, contractById, waitEsbd } = require('../insurance/api');
+const { BASE, errorText, firstMessage, pollProcess, contractById, waitEsbd, saveClient } = require('../insurance/api');
 const { check, unverified, eq, statusOf, integrationChecks, isEnglish, addDays, tomorrowIso, makeRules } = require('../insurance/checks');
 const journal = require('../insurance/journal');
-const { recoverJournal, cardUrl, client } = require('../insurance/purchase');
+const { recoverJournal, cardUrl, client, child } = require('../insurance/purchase');
 const { mstDictionaries, tourist, calcCases, issueApiCases } = require('./cases');
 const { contractChecks } = require('./checks');
 const { requirements: { rules } } = require('../../fixtures/mst.json');
@@ -104,29 +104,6 @@ const ageCode = (born, on) => {
 };
 const phoneFormatted = (p) => `+7(${p.slice(0, 3)})${p.slice(3, 6)}-${p.slice(6, 8)}-${p.slice(8)}`;
 
-// Saves a person in ESBD as the site does before issuing (kdp/save -> the ESBD client id). МСТ needs the passport
-// as the document: the shared test client may last have been saved with the ID card (by another product) —
-// then the server refuses with «тип документа должен быть "rk_passport", получен "rk_id"». The stand sometimes
-// answers 503 here, so up to three tries.
-async function saveClient(p) {
-  const ru = (iso) => iso.split('-').reverse().join('.');
-  const body = {
-    id: p.id || 0, resident_bool: 1, born: ru(p.born), document_type: 'rk_passport', document_number: p.docNumber, document_date: ru(p.docDate),
-    document_issued_by: p.issuedBy, first_name: p.firstName, last_name: p.lastName, iin: p.iin, first_name_eng: p.firstNameLatin,
-    last_name_eng: p.lastNameLatin, ...(p.address ? { address: p.address } : {}),
-  };
-  let res = null;
-  let failure = '';
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    res = await apiCall('POST', `${BASE}/kdp/save`, body).catch((e) => ({ status: 0, data: { message: e.message } }));
-    const id = res.data && res.data.data && res.data.data.client_id;
-    if (id) return id;
-    failure = `kdp/save ${res.status || 'нет ответа'}: ${errorText(res.data).slice(0, 120)}`;
-    if (res.status >= 400 && res.status < 500) break;
-    await new Promise((r) => setTimeout(r, 2000));
-  }
-  throw new Error(`клиент ${p.iin} не сохранён в ЕСБД (${failure})`);
-}
 
 async function saveTourist(t) {
   const id = await saveClient({
@@ -153,6 +130,13 @@ async function buildPolicyBody(c) {
     { iin: p.iin, full_name_latin: `${p.last_name_eng} ${p.first_name_eng}`, born_date: p.born_date, esbd_client_id: holderId,
       passport_number: p.document_number, passport_issued_date: p.document_date, passport_issued_by: p.document_issued_by, gender: p.gender },
   ];
+  if (c.withChild) {
+    // her ESBD record is used as it is: kdp/save refuses her (503) even with her own client id
+    people.push({
+      iin: child.iin, full_name_latin: `${child.last_name_eng} ${child.first_name_eng}`, born_date: child.born_date, esbd_client_id: Number(child.esbd_client_id),
+      passport_number: child.document_number, passport_issued_date: child.document_date, passport_issued_by: child.document_issued_by, gender: child.gender,
+    });
+  }
   for (let i = 0; i < (c.extra || 0); i++) people.push(await saveTourist(tourist('adult', i + 1)));
   const body = {
     variant,
