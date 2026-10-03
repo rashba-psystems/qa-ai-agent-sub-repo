@@ -1,52 +1,19 @@
 'use strict';
 
-// Check model — kept deliberately small.
-//   ok:       true | false | null   (null = «не удалось проверить»: the data needed was not there)
-//   severity: 'bug'  — the system contradicts itself or a CONFIRMED rule
-//             'note' — needs a human: suspicion, or a rule that is not confirmed yet
-//   axis:     'issue' (was the policy issued) · 'data' (do data match) · 'ui' (form/API behaviour)
-//             · 'anomaly' (JS/HTTP errors, slow steps) · 'integration' and 'tariff' (informational only)
-//
-// Scenario status, from the checks:
-//   fail      ❌ — at least one bug
-//   attention ❔ — no bugs, but something could not be verified or needs a decision
-//   pass      ✅ — everything verified and matching
-//   error     🛠 — the scenario could not run to the end (stand or automation)
+// NS checks: rules from the requirements (fixtures/ns.json → requirements), tariffs, the contract, the calculation,
+// and NS_KIT — what an NS purchase expects and checks. The check model and shared checks: src/insurance/checks.js.
 
+const { check, unverified, eq, cardChecks, expectedEnd, tomorrowIso } = require('../insurance/checks');
+const { parseMoney } = require('../insurance/flow');
+const { ROLE_CODES, countLabel } = require('./cases');
+const { client } = require('../insurance/purchase');
 const { tariffs, requirements: { rules } } = require('../../fixtures/ns.json');
-
-function check(name, ok, expected, actual, opts = {}) {
-  if (typeof opts === 'string') opts = { severity: opts };
-  if (opts.severity && !['bug', 'note'].includes(opts.severity)) throw new Error(`check «${name}»: severity может быть только bug или note`);
-  return {
-    name,
-    ok: ok === null ? null : !!ok,
-    severity: opts.severity || 'bug',
-    axis: opts.axis || 'data',
-    rule: opts.rule,
-    expected,
-    actual,
-  };
-}
-
-function unverified(name, expected, reason, axis = 'data') {
-  return check(name, null, expected, `не удалось проверить: ${reason}`, { axis });
-}
 
 // A check that enforces a rule from fixtures/ns.json → requirements: a bug only if the rule is confirmed
 function byRule(ruleId, name, ok, expected, actual, axis = 'ui') {
   const r = rules[ruleId];
   if (!r) throw new Error(`Нет правила ${ruleId} в fixtures/ns.json → requirements`);
-  return check(name, ok, expected, actual, { axis, rule: ruleId, severity: r.confirmed ? 'bug' : 'note' });
-}
-
-// Equality; a missing actual value or a missing reference value means «не удалось проверить»
-function eq(name, actual, expected, opts = {}) {
-  if (expected === undefined || expected === null) return unverified(name, 'эталон', opts.noExpected || 'нет эталонного значения', opts.axis);
-  if (actual === undefined || actual === null || actual === '' || actual === '—') {
-    return unverified(name, expected, opts.missing || 'значения нет', opts.axis);
-  }
-  return check(name, actual === expected, expected, actual, opts);
+  return check(name, ok, expected, actual, { axis, rule: ruleId, severity: r.confirmed ? 'bug' : 'note', unconfirmed: !r.confirmed });
 }
 
 // A refusal counts only when it names what the case broke. Otherwise the rule stays unverified.
@@ -59,53 +26,6 @@ function refusalChecks(c, detail, reason) {
     ];
   }
   return [byRule(c.rule, c.title, true, 'отказ', detail.slice(0, 220), 'ui')];
-}
-
-const STATUS_ORDER = ['error', 'fail', 'attention', 'pass'];
-
-// Integration and tariff axes are informational: they never change the status
-function statusOf(checks, error) {
-  if (error) return 'error';
-  const core = checks.filter((c) => !['integration', 'tariff'].includes(c.axis));
-  if (core.some((c) => c.ok === false && c.severity === 'bug')) return 'fail';
-  if (core.some((c) => c.ok !== true)) return 'attention';
-  return 'pass';
-}
-
-function worstStatus(statuses) {
-  return STATUS_ORDER.find((s) => statuses.includes(s)) || 'pass';
-}
-
-// ---------- dates ----------
-
-function addDays(iso, n) {
-  const d = new Date(`${iso}T00:00:00Z`);
-  d.setUTCDate(d.getUTCDate() + n);
-  return d.toISOString().slice(0, 10);
-}
-
-// Calendar months, clamped to the last day of the target month (31.01 + 1 month = 28.02),
-// the same way the NS server computes it (checked against the calc API on dev).
-function addMonths(iso, n) {
-  const [y, m, d] = iso.split('-').map(Number);
-  const target = new Date(Date.UTC(y, m - 1 + n, 1));
-  const lastDay = new Date(Date.UTC(target.getUTCFullYear(), target.getUTCMonth() + 1, 0)).getUTCDate();
-  target.setUTCDate(Math.min(d, lastDay));
-  return target.toISOString().slice(0, 10);
-}
-
-// '12 месяцев' | '1 месяц' | '5 дней' -> last day of cover for a given start
-function expectedEnd(startIso, term) {
-  const m = /^(\d+)\s+(месяц|месяца|месяцев|день|дня|дней)$/.exec(term || '12 месяцев');
-  if (!m || !startIso) return null;
-  const n = Number(m[1]);
-  return m[2].startsWith('месяц') ? addDays(addMonths(startIso, n), -1) : addDays(startIso, n - 1);
-}
-
-function tomorrowIso() {
-  // Kazakhstan is UTC+5; "tomorrow" is the agent's local tomorrow
-  const local = new Date(Date.now() + 5 * 3600 * 1000);
-  return addDays(local.toISOString().slice(0, 10), 1);
 }
 
 // ---------- premium ----------
@@ -220,88 +140,129 @@ function insuredChecks({ exp, preview }) {
   return out;
 }
 
-// «Паспорт N12234278» — yes; «Паспорт —» or «—» — no
-const hasDocNumber = (v) => /\d/.test(v) && !/—$/.test(v);
-
-// A card row: missing row -> unverified, otherwise compared by `good`
-function shownCheck(name, value, expected, good) {
-  if (value === undefined) return unverified(name, expected, 'строки нет в карточке', 'data');
-  return check(name, good(value), expected, value);
+// The shared card checks + NS's program and total amount (amount × insured)
+function nsCardChecks({ exp, card }) {
+  const out = cardChecks({ exp, card });
+  if (!card) return out;
+  out.push(eq('Карточка: программа', card.program, exp.variant === 'sport' ? 'Спорт' : 'Стандарт'));
+  out.push(eq('Карточка: страховая сумма', card.amount, exp.amountValue * exp.insuredIins.length, { missing: 'в карточке нет страховой суммы' }));
+  return out;
 }
 
-function cardChecks({ exp, card }) {
-  if (!card) return [unverified('Карточка договора открыта в браузере', exp.contractNumber, 'карточку открыть не удалось', 'issue')];
-  return [
-    eq('Карточка: номер договора', card.number, exp.contractNumber, { axis: 'issue' }),
-    eq('Карточка: статус «ОФОРМЛЕН»', card.status, 'ОФОРМЛЕН', { axis: 'issue' }),
-    eq('Карточка: программа', card.program, exp.variant === 'sport' ? 'Спорт' : 'Стандарт'),
-    eq('Карточка: начало срока', card.startDate, exp.startDate),
-    eq('Карточка: окончание срока', card.endDate, exp.endDate),
-    eq('Карточка: страховая сумма', card.amount, exp.amountValue * exp.insuredIins.length, { missing: 'в карточке нет страховой суммы' }),
-    card.holderIinShown === '—'
-      ? check('Карточка: ИИН страхователя', false, exp.holderIin, '—')
-      : eq('Карточка: ИИН страхователя', card.holderIin, exp.holderIin, { missing: 'в карточке нет строки «ИИН / БИН»' }),
-    shownCheck('Карточка: страхователь — дата рождения', card.holderBirthShown, exp.holderBirthDate, (v) => v.split('.').reverse().join('-') === exp.holderBirthDate),
-    shownCheck('Карточка: страхователь — номер документа', card.holderDocShown, 'тип и номер документа', hasDocNumber),
-    shownCheck('Карточка: застрахованный — полное имя', card.insuredNameShown, 'ФИО', (v) => v !== '—'),
-    shownCheck('Карточка: застрахованный — номер документа', card.insuredDocShown, 'тип и номер документа', hasDocNumber),
-    check('Карточка: у застрахованного нет лишнего «0»', !card.insuredStrayZero, 'нет', card.insuredStrayZero ? 'под ИИН выводится «0»' : 'нет'),
-    check('Карточка: ИИН застрахованных', card.insuredIins.length > 0 && [...card.insuredIins].sort().join(',') === [...exp.insuredIins].sort().join(','), exp.insuredIins.join(', '), card.insuredIins.join(', ') || '(нет)'),
+// Everything a purchase scenario promises — drives the form, the pre-issue guard and the checks
+function expectationsOf(c) {
+  const term = c.term || '12 месяцев';
+  const startDate = term === 'Произвольный' ? null : tomorrowIso();
+  return {
+    variant: c.variant || 'standard',
+    contractType: c.contractType || 'adult',
+    count: c.count || 1,
+    amountValue: c.amountValue,
+    term,
+    startDate,
+    endDate: startDate ? expectedEnd(startDate, term) : null,
+    holderIin: client.iin,
+    holderBirthDate: client.person.born_date,
+    insuredIins: [...(c.holderInsured === false ? [] : [client.iin]), ...(c.insureds || []).map((p) => p.iin)],
+    sportCodes: c.sportCodes,
+    phone: client.phone,
+    email: client.email,
+  };
+}
+
+// Sport: insured N on the form (holder first when insured) gets roles[N-1]
+function withRoles(exp, c) {
+  if (c.variant !== 'sport') return exp;
+  const codes = (c.roles || ['Спортсмен']).map((r) => ROLE_CODES[r]);
+  return {
+    ...exp,
+    professions: codes,
+    professionsByIin: Object.fromEntries(exp.insuredIins.map((iin, i) => [iin, codes[i] || codes[0]])),
+  };
+}
+
+// What the form holds vs the scenario — any mismatch stops it before anything is issued
+function step1Checks(exp, s1) {
+  const req = s1.previewRequest || {};
+  const out = [
+    eq('Перед выпуском: программа (по запросу калькулятора)', s1.previewVariant, exp.variant, { axis: 'issue' }),
+    eq('Перед выпуском: категория выбрана', s1.categoryChecked, 'true', { axis: 'issue' }),
+    eq('Перед выпуском: категория (по запросу калькулятора)', req.contract_type, exp.contractType, { axis: 'issue' }),
+    eq('Перед выпуском: количество застрахованных', s1.count, countLabel(exp.count), { axis: 'issue' }),
+    eq('Перед выпуском: страховая сумма', parseMoney(s1.amount), exp.amountValue, { axis: 'issue' }),
+    eq('Перед выпуском: сумма в запросе калькулятора', req.insurance_amount_per_insured, exp.amountValue, { axis: 'issue' }),
+    eq('Перед выпуском: срок', s1.term, exp.term, { axis: 'issue' }),
   ];
+  if (exp.startDate) {
+    out.push(eq('Перед выпуском: дата начала = завтра', s1.startDate, exp.startDate, { axis: 'issue' }));
+    out.push(eq('Перед выпуском: дата окончания', s1.endDate, exp.endDate, { axis: 'issue' }));
+  }
+  if (s1.banner) out.push(check('Шаг 1 без ошибок расчёта', false, 'нет ошибки', s1.banner, { axis: 'issue' }));
+  return out;
 }
 
-// ---------- ESBD integration (informational) ----------
-
-function integrationChecks({ list, contract, certUi }) {
+function step3Checks(exp, s3) {
   const out = [];
-  const opts = { axis: 'integration', severity: 'note' };
-  const esbd = Array.isArray(list) ? list.find((i) => i.system === 'esbd') : null;
-  if (!Array.isArray(list)) {
-    out.push(check('ЕСБД: результат синхронизации', null, 'success', 'не удалось получить /integrations', opts));
-  } else {
-    const err = esbd && (esbd.last_error || '').match(/"message":"([^"]+)"/);
-    out.push(check('ЕСБД: договор принят', esbd ? esbd.status === 'success' : null, 'success', esbd ? `${esbd.status}${err ? `: ${err[1]}` : ''}` : 'записи о синхронизации нет', opts));
-    if (esbd && contract) {
-      // The contract must say what ESBD said — never "pending" after a failure
-      const ok = esbd.status === 'success' ? contract.integration_status === 'success' : esbd.status === 'failed' ? ['failed', 'error'].includes(contract.integration_status) : null;
-      out.push(check('Статус интеграции в договоре соответствует ответу ЕСБД', ok, `как в ЕСБД (${esbd.status})`, contract.integration_status || '(пусто)', opts));
+  if (exp.startDate) {
+    out.push(eq('Шаг 3: дата начала', s3.startDate, exp.startDate, { axis: 'issue' }));
+    out.push(eq('Шаг 3: дата окончания', s3.endDate, exp.endDate, { axis: 'issue' }));
+  }
+  const insured = s3.participants.filter((l, i) => /^Застрахованный \d+$/.test(s3.participants[i - 1] || ''));
+  out.push(eq('Шаг 3: кол-во застрахованных', insured.length, exp.insuredIins.length, { axis: 'issue' }));
+  out.push(eq('Шаг 3: страхователь указан', s3.participants.includes('Страхователь') ? 'да' : null, 'да', { axis: 'issue', missing: 'нет блока «Страхователь»' }));
+  return out;
+}
+
+// A purchase through the site: pays cash and verifies the result
+// The issuance request must be exactly what was asked — any mismatch and it is not sent
+// What the browser is about to send vs what the scenario asked for. Returns a list of mismatches.
+function compareIssueBody(body, exp) {
+  if (!body) return ['тело запроса не прочитано'];
+  const out = [];
+  const same = (name, got, want) => { if (want !== undefined && got !== want) out.push(`${name}: ${got} ≠ ${want}`); };
+  same('variant', body.variant, exp.variant);
+  same('contract_type', body.contract_type, exp.contract_type);
+  same('insurance_amount', body.insurance_amount, exp.insurance_amount);
+  same('start_at', body.start_at, exp.start_at);
+  same('end_at', body.end_at, exp.end_at);
+  same('payment_method', body.payment_method, 'cash');
+  same('policyholder.iin', body.policyholder && body.policyholder.iin, exp.holderIin);
+  const got = (body.insureds || []).map((i) => i.iin).sort().join(',');
+  const want = [...(exp.insuredIins || [])].sort().join(',');
+  if (exp.insuredIins && got !== want) out.push(`insureds: ${got} ≠ ${want}`);
+  if (exp.sport_types) {
+    const gotSports = [...(body.sport_types || [])].sort().join(',');
+    const wantSports = [...exp.sport_types].sort().join(',');
+    if (gotSports !== wantSports) out.push(`sport_types: ${gotSports || '—'} ≠ ${wantSports}`);
+  }
+  if (exp.professionsByIin) {
+    for (const i of body.insureds || []) {
+      const want = exp.professionsByIin[i.iin];
+      if (want && i.profession !== want) out.push(`profession ${i.iin}: ${i.profession || '—'} ≠ ${want}`);
     }
   }
-  if (contract) {
-    out.push(check('global_id присвоен (без него полис нельзя скачать)', !!contract.global_id, 'global_id', contract.global_id || '(пусто)', opts));
-    out.push(check('Ссылка на сертификат (certificate_url)', !!contract.certificate_url, 'ссылка', contract.certificate_url || '(пусто)', opts));
-  }
-  if (certUi && !certUi.skipped) {
-    out.push(check(`Окно «Готовим сертификат…» закрылось за ${Math.round(certUi.limitMs / 1000)} с`, certUi.done, 'закрылось', certUi.done ? `${Math.round(certUi.ms / 1000)} с` : 'висит', opts));
-  }
   return out;
 }
 
-// ---------- anomalies: one line per distinct problem ----------
-
-function anomalyChecks(anomalies) {
-  const opts = { severity: 'note', axis: 'anomaly' };
-  const out = [];
-  const http = new Map();
-  for (const e of anomalies.httpErrors) {
-    const key = `${e.status} ${e.method} ${e.url.split('?')[0]}`;
-    http.set(key, (http.get(key) || 0) + 1);
-  }
-  for (const [key, n] of http) out.push(check('Нет ошибок API во время сценария', false, 'без ошибок', `${key}${n > 1 ? ` ×${n}` : ''}`, opts));
-  for (const e of [...new Set([...anomalies.pageErrors, ...anomalies.consoleErrors])].slice(0, 5)) {
-    out.push(check('Нет JS-ошибок в консоли', false, 'без ошибок', e, opts));
-  }
-  const slow = anomalies.steps.filter((s) => s.ms > 30000 && !['certificate-ui', 'contract-api'].includes(s.name));
-  if (slow.length) out.push(check('Шаги быстрее 30 с', false, '< 30 с', slow.map((s) => `${s.name} ${Math.round(s.ms / 1000)} с`).join(', '), opts));
-  return out;
-}
-
-const LATIN_ONLY = /^[^А-Яа-яЁё]*[A-Za-z][^А-Яа-яЁё]*$/;
-const isEnglish = (s) => !!s && LATIN_ONLY.test(s);
-
-module.exports = {
-  insuredChecks,
-  check, unverified, byRule, eq, refusalChecks, statusOf, worstStatus,
-  premiumChecks, contractChecks, cardChecks, integrationChecks, anomalyChecks,
-  expectedEnd, tomorrowIso, isEnglish, addDays, rules,
+// What an NS purchase expects and checks — the shared purchase (src/insurance/purchase.js → runPurchase) uses it
+const NS_KIT = {
+  product: 'ns',
+  expectations: (c) => withRoles(expectationsOf(c), c),
+  fillStep1: (flow, c, exp) => flow.selectParams({ ...c, ...exp, amount: c.amount }),
+  step1Checks,
+  step3Checks,
+  beforeIssueChecks: ({ exp, preview }) => insuredChecks({ exp, preview }),
+  expectBody: (exp) => ({
+    variant: exp.variant, contract_type: exp.contractType, insurance_amount: exp.amountValue,
+    start_at: exp.startDate || undefined, end_at: exp.endDate || undefined, holderIin: exp.holderIin, insuredIins: exp.insuredIins,
+    sport_types: exp.variant === 'sport' ? exp.sportCodes : undefined, professionsByIin: exp.professionsByIin,
+  }),
+  compare: compareIssueBody,
+  resultChecks: ({ exp, contract, card, preview, step1, step3, payment }) => [
+    ...contractChecks({ exp, contract }),
+    ...nsCardChecks({ exp, card }),
+    ...premiumChecks({ c: exp, preview, step1, step3, payment, contract, card }),
+  ],
 };
+
+module.exports = { byRule, refusalChecks, premiumChecks, contractChecks, insuredChecks, compareIssueBody, NS_KIT };

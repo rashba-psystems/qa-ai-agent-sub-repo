@@ -20,8 +20,8 @@ services:
       - ./tests:/app/tests
       - ./reports:/app/reports
       - ./test-results:/app/test-results
-      # Журнал заявок на выписку НС: после перезапуска бот сначала выясняет судьбу незавершённых
-      - ./data/ns-runs:/app/data/ns-runs
+      # Журнал заявок на выписку (НС и МСТ): после перезапуска бот сначала выясняет судьбу незавершённых
+      - ./data/insurance-runs:/app/data/insurance-runs
 
     # Chromium требует эти флаги внутри Docker
     security_opt:

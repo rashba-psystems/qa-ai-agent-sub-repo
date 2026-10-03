@@ -3,7 +3,7 @@ node_modules
 playwright-report
 test-results
 reports
-data/ns-runs
+data/insurance-runs
 traces
 screenshots
 .DS_Store

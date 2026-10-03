@@ -3,47 +3,14 @@
 // What the NS tests check.
 //   web ns <программа> <категория> <количество> -> one purchase; amount, term, sport types and roles
 //     are picked by the bot from the dictionaries, a new combination on every run (shown in the report)
-//   negativeCases (`web ns ошибки`): form validation, never issue
+//   negativeCases (`web ns ошибки`): form validation, never issue (src/ns/flow.js)
 //   calcCases + issueApiCases (`api ns`): calculator boundaries and issuance straight through the API —
 //     every issuance request the server accepts is a REAL policy
 
-const { addDays } = require('./checks');
-const { client } = require('../../fixtures/ns.json');
+const { addDays } = require('../insurance/checks');
+const { generateIin, birthDateForAge, client } = require('../insurance/purchase');
 
-// ---------- Kazakhstan IIN: YYMMDD + century/sex digit + 4-digit serial + check digit ----------
-
-function checkDigit(first11) {
-  const d = first11.split('').map(Number);
-  let s = d.reduce((acc, x, i) => acc + x * (i + 1), 0) % 11;
-  if (s === 10) s = d.reduce((acc, x, i) => acc + x * (((i + 2) % 11) + 1), 0) % 11;
-  return s === 10 ? null : s;
-}
-
-// birthDate: 'YYYY-MM-DD', gender: 'male' | 'female'
-function generateIin(birthDate, gender = 'male', serial = 7000) {
-  const [y, m, d] = birthDate.split('-');
-  const century = Number(y.slice(0, 2));
-  const sexDigit = { 18: [1, 2], 19: [3, 4], 20: [5, 6] }[century][gender === 'male' ? 0 : 1];
-  for (let k = serial; k < serial + 100; k++) {
-    const base = `${y.slice(2)}${m}${d}${sexDigit}${String(k).padStart(4, '0')}`;
-    const c = checkDigit(base);
-    if (c !== null) return base + c;
-  }
-  throw new Error(`Не удалось сгенерировать ИИН для ${birthDate}`);
-}
-
-// Birth date for someone who is exactly `years` old today (+ offsetDays to step over a boundary)
-function birthDateForAge(years, offsetDays = 0, today = new Date()) {
-  const d = new Date(Date.UTC(today.getUTCFullYear() - years, today.getUTCMonth(), today.getUTCDate()));
-  d.setUTCDate(d.getUTCDate() + offsetDays);
-  return d.toISOString().slice(0, 10);
-}
-
-// The first 11 digits of a valid IIN with a deliberately wrong check digit
-function withBadChecksum(iin) {
-  const wrong = (Number(iin[11]) + 1) % 10;
-  return iin.slice(0, 11) + wrong;
-}
+// ---------- made-up people, entered by hand on the form (only one test person exists in GBD) ----------
 
 // ---------- made-up people, entered by hand on the form (only one test person exists in GBD) ----------
 
@@ -62,7 +29,9 @@ function syntheticPerson(age, { gender = 'male', lastName = 'ТЕСТОВ', firs
 }
 
 const ADULT_AGES = [30, 35, 40, 45, 50, 55, 60, 25, 28];
+
 const CHILD_AGES = [5, 8, 11, 14, 17, 3, 6, 9, 12, 15];
+
 const ORDINALS = ['ПЕРВЫЙ', 'ВТОРОЙ', 'ТРЕТИЙ', 'ЧЕТВЕРТЫЙ', 'ПЯТЫЙ', 'ШЕСТОЙ', 'СЕДЬМОЙ', 'ВОСЬМОЙ', 'ДЕВЯТЫЙ', 'ДЕСЯТЫЙ'];
 
 // adults: the test client is insured #1, the rest are made up; children: every insured is a made-up child
@@ -82,13 +51,17 @@ function extraPeople(contractType, count) {
 // ---------- `web ns <программа> <категория> <количество>` ----------
 
 const MAX_INSURED = 10;
+
 const VARIANT = { стандарт: 'standard', standard: 'standard', спорт: 'sport', sport: 'sport' };
+
 const CATEGORY = {
   взрослые: 'adult', взрослый: 'adult', взр: 'adult', adult: 'adult',
   дети: 'children', детский: 'children', ребенок: 'children', children: 'children',
 };
+
 // the form's term options; «Произвольный» needs dates typed in and is left out
 const TERMS = ['12 месяцев', '6 месяцев', '3 месяца', '1 месяц', '5 дней'];
+
 const ROLES = ['Спортсмен', 'Тренер / судья', 'Параспортсмен'];
 
 // Words in any order, anything not given: Стандарт, взрослые, 1 человек
@@ -106,13 +79,32 @@ function parseWebArgs(args) {
 }
 
 const pick = (list) => list[Math.floor(Math.random() * list.length)];
+
 // «спортсмен ×2, тренер / судья» — roles in the order of the list, with counts
 const roleSummary = (roles) => ROLES.filter((r) => roles.includes(r))
   .map((r) => { const n = roles.filter((x) => x === r).length; return `${r.toLowerCase()}${n > 1 ? ` ×${n}` : ''}`; }).join(', ');
+
 const pickSome = (list, n) => [...list].sort(() => Math.random() - 0.5).slice(0, n);
 
+const plural = (n, [one, few, many]) => {
+  const t = n % 10, h = n % 100;
+  return `${n} ${t === 1 && h !== 11 ? one : t >= 2 && t <= 4 && (h < 12 || h > 14) ? few : many}`;
+};
+
+// What was bought, in the report's words
+function purchaseLines(p) {
+  const children = p.contractType === 'children';
+  const people = children ? plural(p.count, ['ребёнок', 'ребёнка', 'детей']) : plural(p.count, ['взрослый', 'взрослых', 'взрослых']);
+  const roles = p.roles ? ` (${roleSummary(p.roles)})` : '';
+  return [
+    p.variant === 'sport' ? `• Программа «Спорт»: ${p.sportTypes.join(', ')}` : '• Программа «Стандарт»',
+    `• Застрахованы: ${people}${roles}`,
+    `• Сумма ${p.amount.replace(' тг', ' ₸')} на каждого, срок ${p.term}`,
+  ];
+}
+
 // The purchase: what the person asked for + amount, term, sports and roles picked by the bot.
-// dict: { amounts: [{ label, value }], sports: [name] } from the NS schema (api.nsDictionaries)
+// dict: { amounts: [{ label, value }], sports: [name], sportCodes: { name: code } } from the NS schema (api.nsDictionaries)
 function webCase({ variant, contractType, count }, dict) {
   const sport = variant === 'sport';
   const children = contractType === 'children';
@@ -131,6 +123,7 @@ function webCase({ variant, contractType, count }, dict) {
 
   return {
     id: 'WEB',
+    product: 'ns',
     kind: 'issue',
     title,
     variant,
@@ -140,8 +133,10 @@ function webCase({ variant, contractType, count }, dict) {
     amountValue: amount.value,
     term,
     sportTypes,
+    sportCodes: sport ? sportTypes.map((s) => dict.sportCodes[s] || s) : undefined,
     roles,
     holderInsured: !children,
+    purchase: { what: 'полис НС через сайт', lines: purchaseLines({ variant, contractType, count, amount: amount.label, term, sportTypes, roles }) },
     insureds: extraPeople(contractType, count),
     // known issues that depend on parameters match these (fixtures/ns.json → knownIssues → cases)
     tags: `variant:${variant} category:${contractType} count:${count} amount:${amount.value} term:${term}`,
@@ -213,7 +208,13 @@ const issueApiCases = [
   { id: 'I18', rule: 'holder-iin-required', expectError: /policyholder\.iin/, title: 'API: страхователь без ИИН отклоняется', expect: 'reject', patch: (b) => { delete b.policyholder.iin; } },
 ];
 
-module.exports = {
-  negativeCases, calcCases, issueApiCases, client, ROLE_CODES, MAX_INSURED,
-  parseWebArgs, webCase, generateIin, birthDateForAge, withBadChecksum,
-};
+// «1 человек», «2 человека», «5 человек» — as the form's count list says it
+function countLabel(n) {
+  const mod10 = n % 10;
+  const mod100 = n % 100;
+  if (mod10 === 1 && mod100 !== 11) return `${n} человек`;
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return `${n} человека`;
+  return `${n} человек`;
+}
+
+module.exports = { countLabel, negativeCases, calcCases, issueApiCases, ROLE_CODES, MAX_INSURED, parseWebArgs, webCase };

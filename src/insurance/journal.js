@@ -4,7 +4,7 @@
 //   submitting  — about to press the final button / send POST (no process id yet)
 //   submitted   — the server answered with a process id
 //   resolved    — final outcome known (contract number or failure), or released by a person
-// One JSON file per attempt in data/ns-runs/ (mounted in Docker/k8s so it survives restarts).
+// One JSON file per attempt in data/insurance-runs/ (shared by НС and МСТ, mounted in Docker/k8s so it survives restarts).
 //
 // The rule throughout: only a definite answer closes an entry. «No answer», «still processing»,
 // «API unavailable» or «unreadable file» keep it open, and an open entry blocks a new issuance.
@@ -12,9 +12,9 @@
 const fs = require('fs-extra');
 const path = require('path');
 const crypto = require('crypto');
-const { processStatus, findNsContracts, isFinal } = require('./api');
+const { processStatus, findContracts, isFinal } = require('./api');
 
-const DIR = process.env.NS_JOURNAL_DIR || path.resolve(__dirname, '../../data/ns-runs');
+const DIR = process.env.JOURNAL_DIR || path.resolve(__dirname, '../../data/insurance-runs');
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/; // a record id is a file name in DIR — nothing that can leave it
 
 const file = (id) => path.join(DIR, `${id}.json`);
@@ -38,8 +38,8 @@ async function write(entry) {
 }
 
 // expectsIssue: the case is supposed to create a policy (a repeat would be a duplicate)
-async function begin({ caseId, channel, iin, expectsIssue = true }) {
-  return write({ id: crypto.randomUUID(), caseId, channel, iin, expectsIssue, state: 'submitting', createdAt: new Date().toISOString() });
+async function begin({ caseId, channel, iin, expectsIssue = true, product = 'ns' }) {
+  return write({ id: crypto.randomUUID(), caseId, channel, product, iin, expectsIssue, state: 'submitting', createdAt: new Date().toISOString() });
 }
 
 async function submitted(entry, processId) {
@@ -84,7 +84,7 @@ async function recover(entry) {
     return { entry, known: false, note: `файл журнала повреждён (${entry.error}) — неизвестно, какая заявка в нём была` };
   }
   if (entry.processId) {
-    const res = await processStatus(entry.processId).catch((e) => ({ error: e.message }));
+    const res = await processStatus(entry.processId, entry.product || 'ns').catch((e) => ({ error: e.message }));
     const st = res && res.ok && res.data && res.data.data;
     if (!st) return { entry, known: false, note: `статус процесса ${entry.processId} не получен (${res && res.error ? res.error : `HTTP ${res && res.status}`})` };
     if (!isFinal(st.Status)) {
@@ -103,7 +103,7 @@ async function recover(entry) {
   const to = from + 5 * 60 * 1000;
   let list;
   try {
-    list = await findNsContracts(entry.iin);
+    list = await findContracts(entry.iin, entry.product || 'ns');
   } catch (e) {
     return { entry, known: false, note: `поиск договоров недоступен (${e.message.slice(0, 80)}) — итог неизвестен` };
   }

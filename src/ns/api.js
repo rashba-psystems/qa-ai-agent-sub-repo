@@ -1,103 +1,20 @@
 'use strict';
 
-// Everything the NS tests do straight through the NDP API, no browser.
-//   calls:       calculator  POST /calc/products/ns/variants/{variant}/preview
-//                issuance    POST /ns/policies -> { process_instance_id } -> GET /ns/policies/{id}/status
-//                contract    GET /contracts/{policy id}, GET /contracts?search=..., GET /contracts/{number}/integrations
-//   calculator:  boundary values (A01–A22) — never issues a policy
-//   issuance:    the same requests the site makes (I01–I18) — every request the server accepts is a REAL policy
+// `api ns`: straight to the server, no browser — calculator boundaries (A01–A22, never issue) and issuance
+// with the same requests the site makes (I01–I18: every request the server accepts is a REAL policy).
+// Also the NS dictionaries the bot picks a purchase from.
 
-const { apiCall, apiRequest, listContracts } = require('../ndp/client');
-const {
-  check, unverified, eq, byRule, refusalChecks, contractChecks, integrationChecks, isEnglish, addDays, tomorrowIso, expectedEnd,
-} = require('./checks');
-const { client } = require('../../fixtures/ns.json');
-
-// journal.js uses the calls below, so it is loaded on first use instead of at the top
-const journal = () => require('./journal');
-
-const BASE = '/v1/ui/policy/v1';
-const FINAL = new Set(['completed', 'failed', 'error', 'rejected', 'cancelled', 'canceled']);
-const isFinal = (status) => FINAL.has(String(status).toLowerCase());
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-// How long / how often to poll the issuance process (overridable for the offline tests)
-const POLL_TIMEOUT_MS = Number(process.env.NS_POLL_TIMEOUT_MS) || 120000;
-const POLL_INTERVAL_MS = Number(process.env.NS_POLL_INTERVAL_MS) || 3000;
-
-// "Validation failed; insurance_amount: invalid" — the whole error, for matching the expected reason
-function errorText(data) {
-  if (!data) return '';
-  const parts = [data.message || ''];
-  if (data.errors && typeof data.errors === 'object') {
-    for (const [k, v] of Object.entries(data.errors)) parts.push(`${k}: ${Array.isArray(v) ? v.join(', ') : v}`);
-  }
-  return parts.filter(Boolean).join('; ');
-}
-
-// The first human-readable error message (for the language check)
-function firstMessage(data) {
-  const errs = data && data.errors;
-  if (errs && typeof errs === 'object') {
-    const v = Object.values(errs)[0];
-    return Array.isArray(v) ? v[0] : String(v);
-  }
-  return (data && data.message) || '';
-}
+const { apiCall, apiRequest } = require('../ndp/client');
+const { BASE, errorText, firstMessage, pollProcess, contractById, waitEsbd } = require('../insurance/api');
+const { check, unverified, eq, statusOf, integrationChecks, isEnglish, addDays, tomorrowIso, expectedEnd } = require('../insurance/checks');
+const journal = require('../insurance/journal');
+const { recoverJournal, cardUrl, client } = require('../insurance/purchase');
+const { byRule, refusalChecks, contractChecks } = require('./checks');
+const { calcCases, issueApiCases } = require('./cases');
 
 const calcPreview = (variant, body) => apiCall('POST', `${BASE}/calc/products/ns/variants/${variant}/preview`, body);
+
 const createPolicy = (body) => apiCall('POST', `${BASE}/ns/policies`, body);
-const processStatus = (processId) => apiCall('GET', `${BASE}/ns/policies/${processId}/status`);
-
-// Follows one issuance process until it ends — the only link between a run and its contract
-async function pollProcess(processId, timeoutMs = POLL_TIMEOUT_MS) {
-  const deadline = Date.now() + timeoutMs;
-  const history = [];
-  let last = null;
-  while (Date.now() < deadline) {
-    const res = await processStatus(processId).catch(() => null);
-    last = (res && res.ok && res.data && res.data.data) || last;
-    if (last && history[history.length - 1] !== last.Status) history.push(last.Status);
-    if (last && isFinal(last.Status)) return { last, history, final: true };
-    await sleep(POLL_INTERVAL_MS);
-  }
-  return { last, history, final: false };
-}
-
-// Contract card by policy id (= Status.ID) + fields only the list endpoint has (policyholder, contacts)
-async function contractById(policyId, contractNumber) {
-  const card = await apiRequest('GET', `${BASE}/contracts/${encodeURIComponent(policyId)}`).then((r) => r.data, () => null);
-  if (!card) return null;
-  const list = await listContracts({ product: 'ns', search: contractNumber, perPage: 5 }).catch(() => null);
-  const item = ((list && list.items) || []).find((c) => c.contract_number === contractNumber) || {};
-  return {
-    ...item,
-    ...card,
-    policyholder: item.policyholder,
-    delivery_phone: item.delivery_phone || card.delivery_phone,
-    delivery_email: item.delivery_email || card.delivery_email,
-  };
-}
-
-async function integrations(contractNumber) {
-  const res = await apiCall('GET', `${BASE}/contracts/${encodeURIComponent(contractNumber)}/integrations`).catch(() => null);
-  const list = res && res.ok && res.data ? res.data.data : null;
-  return Array.isArray(list) ? list : null; // anything else = «не удалось получить»
-}
-
-// Waits until ESBD has answered for this contract (success or failed), up to timeoutMs
-async function waitEsbd(contractNumber, timeoutMs = 20000) {
-  const deadline = Date.now() + timeoutMs;
-  let list = null;
-  while (Date.now() < deadline) {
-    list = await integrations(contractNumber);
-    const esbd = list && list.find((i) => i.system === 'esbd');
-    if (esbd && ['success', 'failed'].includes(esbd.status)) break;
-    await sleep(POLL_INTERVAL_MS);
-  }
-  return list;
-}
-
-const findNsContracts = (iin) => listContracts({ product: 'ns', search: iin, perPage: 10 });
 
 async function sportCodeMap() {
   const s = await apiRequest('GET', `${BASE}/ns/schema?variant=sport&locale=ru`);
@@ -111,6 +28,7 @@ async function nsDictionaries() {
   return {
     amounts: (d.amounts || []).map((a) => ({ label: a.label, value: Number(a.value) })).filter((a) => a.value > 0),
     sports: (d.sport_types || []).map((x) => x.label),
+    sportCodes: Object.fromEntries((d.sport_types || []).map((x) => [x.label, x.value])),
   };
 }
 
@@ -236,18 +154,18 @@ async function calculatorPremium(body) {
 // Sends the request with the journal around it. Only a process id or a 4xx closes the journal entry;
 // 5xx, a network failure or an odd 2xx leave it open (the server may have created a policy anyway).
 async function submit(c, body) {
-  const entry = await journal().begin({ caseId: c.id, channel: 'api', iin: client.iin, expectsIssue: c.expect === 'issue' });
+  const entry = await journal.begin({ caseId: c.id, channel: 'api', iin: client.iin, expectsIssue: c.expect === 'issue' });
   let post;
   try {
     post = await createPolicy(body);
   } catch (e) {
-    await journal().unanswered(entry, 'network', e.message);
+    await journal.unanswered(entry, 'network', e.message);
     throw e;
   }
   const processId = post.ok && post.data && post.data.data && post.data.data.process_instance_id;
-  if (processId) await journal().submitted(entry, processId);
-  else if (post.status >= 400 && post.status < 500) await journal().resolve(entry, { status: `rejected_${post.status}`, error: errorText(post.data).slice(0, 300) });
-  else await journal().unanswered(entry, post.status, errorText(post.data));
+  if (processId) await journal.submitted(entry, processId);
+  else if (post.status >= 400 && post.status < 500) await journal.resolve(entry, { status: `rejected_${post.status}`, error: errorText(post.data).slice(0, 300) });
+  else await journal.unanswered(entry, post.status, errorText(post.data));
   return { post, processId, entry };
 }
 
@@ -261,14 +179,14 @@ async function runPositive(c) {
   if (!processId) return { checks, out };
   out.processId = processId;
 
-  const proc = await pollProcess(processId);
+  const proc = await pollProcess(processId, 'ns');
   out.statusHistory = proc.history.join(' → ');
   if (!proc.final) {
     checks.push(unverified('Выписка завершена (NDP)', 'completed', `процесс не завершился за 2 мин (${out.statusHistory}); итог выяснится по журналу`, 'issue'));
     return { checks, out };
   }
   const st = proc.last;
-  await journal().resolve(entry, { status: st.Status, contractNumber: st.ContractNumber, policyId: st.ID, exact: true });
+  await journal.resolve(entry, { status: st.Status, contractNumber: st.ContractNumber, policyId: st.ID, exact: true });
   checks.push(eq('Выписка завершена (NDP)', st.Status, 'completed', { axis: 'issue' }));
   if (st.Status !== 'completed') return { checks, out };
   Object.assign(out, { contractNumber: st.ContractNumber, policyId: st.ID });
@@ -303,10 +221,10 @@ async function runNegative(c) {
   }
 
   out.processId = processId;
-  const proc = await pollProcess(processId);
+  const proc = await pollProcess(processId, 'ns');
   out.statusHistory = proc.history.join(' → ');
   const st = proc.last;
-  if (proc.final) await journal().resolve(entry, { status: st.Status, contractNumber: st.ContractNumber || null, policyId: st.ID, exact: true });
+  if (proc.final) await journal.resolve(entry, { status: st.Status, contractNumber: st.ContractNumber || null, policyId: st.ID, exact: true });
 
   if (st && st.Status === 'completed') {
     Object.assign(out, { contractNumber: st.ContractNumber, policyId: st.ID });
@@ -346,8 +264,42 @@ async function runIssueCase(c) {
   return r;
 }
 
-module.exports = {
-  errorText, firstMessage, isFinal,
-  calcPreview, createPolicy, processStatus, pollProcess, contractById, integrations, waitEsbd, findNsContracts, sportCodeMap, nsDictionaries,
-  runCalcCase, calcSummaryChecks, runIssueCase, buildPolicyBody,
-};
+// ---------- the whole `api ns` run ----------
+
+// Calculator first (never issues), then issuance; an issuance case whose earlier request is still open is not re-run
+async function runApiSuite({ onProgress = async () => {} } = {}) {
+  const total = calcCases.length + issueApiCases.length;
+  const results = [];
+  let done = 0;
+  await onProgress({ done, total, current: 'проверяю незавершённые заявки прошлых запусков' });
+  const rec = await recoverJournal({ channel: 'api' });
+  if (rec.row) results.push({ ...rec.row, product: 'ns' });
+
+  await onProgress({ done, total, current: `калькулятор: ${calcCases.length} проверок` });
+  const calcResults = [];
+  for (const c of calcCases) {
+    const r = await runCalcCase(c).catch((e) => ({ id: c.id, title: c.title, kind: 'api', checks: [], error: e.message }));
+    calcResults.push({ ...r, product: 'ns', status: statusOf(r.checks, r.error) });
+    done++;
+  }
+  const summary = { id: 'A--', title: 'Калькулятор: общие наблюдения', kind: 'api', product: 'ns', checks: calcSummaryChecks(calcResults) };
+  summary.status = statusOf(summary.checks);
+  results.push(...calcResults, summary);
+
+  for (const c of issueApiCases) {
+    if (rec.blocked.has(c.id) || rec.blocked.has('*')) {
+      const why = rec.blocked.has('*') ? 'журнал заявок повреждён' : 'прошлая заявка этого сценария ещё не завершилась';
+      results.push({ id: c.id, title: c.title, kind: 'api-issue', expect: c.expect, product: 'ns', checks: [], status: 'error', error: `${why} — новый запуск не выполнялся, чтобы не создать лишний полис (см. R--)` });
+      done++;
+      continue;
+    }
+    await onProgress({ done, total, current: `${c.id} ${c.title}` });
+    const r = await runIssueCase(c);
+    if (r.policyId) r.cardUrl = cardUrl(r.policyId);
+    results.push({ ...r, product: 'ns', status: statusOf(r.checks, r.error) });
+    done++;
+  }
+  return results;
+}
+
+module.exports = { runApiSuite, nsDictionaries, sportCodeMap, calcPreview, buildPolicyBody };

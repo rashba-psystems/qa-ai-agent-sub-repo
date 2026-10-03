@@ -1,13 +1,27 @@
 'use strict';
 
-// Telegram summary for an NS run.
-// Problems already reported to the team (fixtures/ns.json → knownIssues) are shown apart from new ones.
+// The Telegram report of a run, for any product: a plain-language verdict, new problems apart from known ones,
+// and bug screenshots with captions. Known issues: fixtures/insurance.json (shared parts of the site)
+// + fixtures/<product>.json (that product only). A purchase describes itself: result.purchase = { what, lines }.
 
-const { statusOf, rules } = require('./checks');
-const knownIssues = require('../../fixtures/ns.json').knownIssues.issues.map((i) => ({
+const fs = require('fs');
+const path = require('path');
+const { statusOf } = require('./checks');
+
+const compile = (product) => (i) => ({
   ...i,
-  match: i.match.map((m) => Object.fromEntries(Object.entries(m).map(([k, v]) => [k, ['rule', 'axis'].includes(k) ? v : new RegExp(v)]))),
-}));
+  match: i.match.map((m) => ({
+    product,
+    ...Object.fromEntries(Object.entries(m).map(([k, v]) => [k, ['rule', 'axis'].includes(k) ? v : new RegExp(v)])),
+  })),
+});
+// fixtures/insurance.json — shared parts of the site; fixtures/<product>.json — that product only (its file name)
+const FIXTURES = path.resolve(__dirname, '../../fixtures');
+const knownIssues = fs.readdirSync(FIXTURES).filter((f) => f.endsWith('.json')).flatMap((f) => {
+  const data = JSON.parse(fs.readFileSync(path.join(FIXTURES, f), 'utf8'));
+  const product = f === 'insurance.json' ? undefined : f.replace(/\.json$/, '');
+  return ((data.knownIssues && data.knownIssues.issues) || []).map(compile(product));
+});
 
 const ICON = { pass: '✅', fail: '❌', attention: '❔', error: '🛠' };
 
@@ -21,6 +35,7 @@ const CHECK_FIELDS = ['check', 'rule', 'axis', 'actual', 'expected'];
 const caseKey = (r) => [r.id, r.tags].filter(Boolean).join(' ');
 
 function conditionMatches(m, r, k) {
+  if (m.product && r.product && m.product !== r.product) return false; // a product's own issue never matches another product
   if (m.cases && !m.cases.test(caseKey(r))) return false;
   if (!k) return m.error ? m.error.test(r.error || '') : !CHECK_FIELDS.some((f) => m[f]); // whole-scenario conditions
   if (m.error) return false;
@@ -53,7 +68,7 @@ function knownSummary(results) {
     for (const id of ids) seen.set(id, [...(seen.get(id) || []), r.id]);
   }
   const notSeen = knownIssues.filter((i) => !i.intermittent && !seen.has(i.id) && i.match.some((m) => results.some((r) => {
-    if (r.status === 'error' || (m.cases && !m.cases.test(caseKey(r)))) return false;
+    if (r.status === 'error' || (m.product && r.product && m.product !== r.product) || (m.cases && !m.cases.test(caseKey(r)))) return false;
     const identity = ['check', 'rule', 'axis'].filter((f) => m[f]);
     if (!identity.length) return !CHECK_FIELDS.some((f) => m[f]) && !m.error; // whole-scenario condition: the scenario ran
     return r.checks.some((k) => identity.every((f) => (f === 'check' ? m.check.test(k.name) : k[f] === m[f])));
@@ -64,8 +79,11 @@ function knownSummary(results) {
 // ---------- plain language: what a check found, said for someone who does not know the system ----------
 
 const isNum = (v) => v !== null && v !== '' && !Number.isNaN(Number(v));
+
 const money = (v) => (isNum(v) ? `${Number(v).toLocaleString('ru-RU').replace(/ /g, ' ')} ₸` : v);
+
 const shown = (v) => (v == null || v === '' || v === '—' || v === '(пусто)' ? 'пусто' : `«${v}»`);
+
 const isoToRu = (v) => (/^\d{4}-\d{2}-\d{2}$/.test(String(v)) ? String(v).split('-').reverse().join('.') : v);
 
 // Where a check looked, by the start of its name
@@ -89,7 +107,9 @@ const SAY = [
   [/^Карточка: застрахованный — номер документа$/, (k) => `В карточке полиса у застрахованного нет номера документа (написано ${shown(k.actual)})`],
   [/^Карточка: у застрахованного нет лишнего «0»$/, () => 'В карточке полиса под ИИН застрахованного выводится лишний «0»'],
   [/^Договор: у застрахованных заполнены сумма и премия$/, (k) => `В договоре у застрахованных сумма и премия равны 0 (${k.actual})`],
-  [/= калькулятор$|^Премия = /, (k) => `${placeOf(k.name) || 'Цена'}: ${money(k.actual)}, а калькулятор насчитал ${money(k.expected)}`],
+  [/^Премия = калькулятор$/, (k) => `После выписки сервер записал премию ${money(k.actual)}, а калькулятор насчитал ${money(k.expected)}`],
+  [/^Договор: total_premium = калькулятор$/, (k) => `В договоре на сервере премия ${money(k.actual)}, а калькулятор насчитал ${money(k.expected)}`],
+  [/= калькулятор$|^Премия = /, (k) => `${placeOf(k.name) || 'Где-то'} цена ${money(k.actual)}, а калькулятор насчитал ${money(k.expected)}`],
   [/^ЕСБД: договор принят$/, (k) => `Государственная база ЕСБД не приняла полис (ответ: ${String(k.actual).replace(/^failed: /, '')})`],
   [/^global_id присвоен/, () => 'Полис не получил номер в ЕСБД, поэтому его нельзя скачать'],
   [/^Ссылка на сертификат/, () => 'Нет ссылки на сертификат полиса'],
@@ -101,6 +121,8 @@ const SAY = [
   [/^Анкета сформирована и скачана$/, (k) => `Анкета не печатается (${k.actual})`],
   [/^Без анкеты «Выписать полис» недоступна$/, () => 'Полис можно выписать, не распечатав анкету'],
   [/^Выписка завершена \(NDP\)$/, (k) => `Сервер не завершил выписку: статус ${shown(k.actual)}`],
+  [/^Сайт даёт выписать полис$/, (k) => `Сайт не даёт выписать такой полис (${k.actual}) — возможно, так задумано, нужно решение`],
+  [/^Карточка: территория$/, (k) => `В карточке полиса страна написана как ${shown(k.actual)} вместо ${shown(k.expected)}`],
 ];
 
 function placeOf(name) {
@@ -111,7 +133,7 @@ function placeOf(name) {
 // One sentence about a problem a check found (ok === false) or could not check (ok === null).
 // A check named like its scenario (API cases) is not named again.
 function plain(k, scenarioTitle) {
-  const unconfirmed = k.rule && rules[k.rule] && !rules[k.rule].confirmed;
+  const unconfirmed = k.unconfirmed;
   const reason = String(fmt(k.actual)).replace(/^не удалось проверить: /, '');
   if (k.ok === null) return k.name === scenarioTitle ? `не удалось проверить: ${reason}` : `${k.name} — не удалось проверить: ${reason}`;
   const say = SAY.find(([re]) => re.test(k.name));
@@ -130,6 +152,7 @@ const STEP_RU = {
   insured: 'добавление застрахованных', anketa: 'печать анкеты', payment: 'окно оплаты', 'pre-issue': 'проверка перед выпиской',
   issue: 'выписка', card: 'карточка полиса',
 };
+
 function plainError(error) {
   const m = /^\[([\w-]+)\] ([\s\S]*)$/.exec(error || '');
   if (m) return `Автотест остановился на шаге «${STEP_RU[m[1]] || m[1]}»: ${m[2]}`;
@@ -189,17 +212,6 @@ function sections({ fresh, decide, unchecked }, results) {
   return out;
 }
 
-function purchaseLines(p) {
-  const children = p.contractType === 'children';
-  const people = children ? plural(p.count, ['ребёнок', 'ребёнка', 'детей']) : plural(p.count, ['взрослый', 'взрослых', 'взрослых']);
-  const roles = p.roles ? ` (${[...new Set(p.roles)].map((r) => { const n = p.roles.filter((x) => x === r).length; return `${r.toLowerCase()}${n > 1 ? ` ×${n}` : ''}`; }).join(', ')})` : '';
-  return [
-    p.variant === 'sport' ? `• Программа «Спорт»: ${p.sportTypes.join(', ')}` : '• Программа «Стандарт»',
-    `• Застрахованы: ${people}${roles}`,
-    `• Сумма ${p.amount.replace(' тг', ' ₸')} на каждого, срок ${p.term}`,
-  ];
-}
-
 // The verdict in one line — also used for the progress message
 function headline(results, title) {
   annotate(results);
@@ -214,7 +226,7 @@ function headline(results, title) {
 }
 
 function purchaseText(r, meta) {
-  const lines = [headline([r]), '', 'Что делали: оформляли полис НС через сайт', ...purchaseLines(r.purchase), whenLine(meta) && `• ${whenLine(meta)}`].filter((x) => x !== null && x !== undefined && x !== false);
+  const lines = [headline([r]), '', `Что делали: оформляли ${r.purchase.what}`, ...r.purchase.lines, whenLine(meta) && `• ${whenLine(meta)}`].filter((x) => x !== null && x !== undefined && x !== false);
   if (r.contractNumber) {
     lines.push('', `Полис ${r.contractNumber}${r.card && r.card.status ? ` — ${r.card.status.toLowerCase()}` : ''}`, r.cardUrl);
   } else if (r.error && (r.journalId || r.processId)) {
@@ -243,7 +255,7 @@ function suiteText(results, title, meta) {
   return lines.join('\n');
 }
 
-function summaryText(results, { title = 'НС: прогон', meta } = {}) {
+function summaryText(results, { title = 'Прогон', meta } = {}) {
   annotate(results);
   return results.length === 1 && results[0].purchase ? purchaseText(results[0], meta) : suiteText(results, title, meta);
 }
@@ -251,6 +263,7 @@ function summaryText(results, { title = 'НС: прогон', meta } = {}) {
 // ---------- screenshots ----------
 
 const MAX_PHOTOS = 10;
+
 const CAPTION_MAX = 1024; // Telegram limit
 
 function caption(parts) {

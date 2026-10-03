@@ -51,10 +51,10 @@ spec:
             - name: qa-data
               mountPath: /app/test-results
               subPath: test-results
-            # Журнал заявок на выписку НС — должен переживать перезапуск пода
+            # Журнал заявок на выписку (НС и МСТ) — должен переживать перезапуск пода
             - name: qa-data
-              mountPath: /app/data/ns-runs
-              subPath: ns-runs
+              mountPath: /app/data/insurance-runs
+              subPath: insurance-runs
 
           # Chromium требует /dev/shm минимум 256MB
           - name: dshm

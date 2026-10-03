@@ -12,9 +12,8 @@ const { handleInvestigate } = require('./src/bot/handlers/investigateHandler');
 const { handlePolicy } = require('./src/bot/handlers/policyHandler');
 const { handleWebOgpoPolicy } = require('./src/bot/handlers/webOgpoPolicyHandler');
 const { handleWebOgpoLegal } = require('./src/bot/handlers/webOgpoLegalEntityPolicyHandler');
-const { mstWizard } = require('./src/bot/handlers/webMstPolicyHandler');
-const { mstPremiumWizard } = require('./src/bot/handlers/webMstPremiumPolicyHandlers');
 const { handleNsCommand, isInfoCommand } = require('./src/bot/handlers/nsHandler');
+const { handleMstCommand, isMstInfoCommand } = require('./src/bot/handlers/mstHandler');
 const { removeUserFromQueue } = require('./src/bot/queue')
 const { initBrowser, closeBrowser } = require('./src/bot/middleware/browserManager');
 
@@ -22,7 +21,7 @@ const bot = new Telegraf(process.env.BOT_TOKEN, {
   handlerTimeout: 10 * 60 * 1000, // 10 minutes — AI gen + PDF upload + playwright
 });
 
-const stage = new Scenes.Stage([mstWizard, mstPremiumWizard]);
+const stage = new Scenes.Stage([]);
 
 // Команда отмены для сцен
 stage.hears('cancel', async (ctx) => {
@@ -76,8 +75,11 @@ _Пример: policy ns NS\\-2025\\-000099_
 _Пример: web ogpo individual_ — для физических лиц
 _Пример: web ogpo legal_ — для юридических лиц
 
-\`web mst | web mst premium\`
-Оформить полис МСТ или МСТ Премиум (Playwright + OCR + CRM)
+\`web mst [premium] [цель] [возраст] [1–5]\` — через сайт (браузер)
+Выписать полис МСТ; страну, сумму, даты, вид спорта бот выбирает сам
+_Пример: web mst спорт 75+ 2_
+_Пример: web mst premium деловые 4-74 5_
+_web mst помощь_ — подсказка, _web mst тесты_ — что проверяется
 
 \`web ns [стандарт|спорт] [взрослые|дети] [1–10]\` — через сайт (браузер)
 Выписать полис НС; сумму, срок, виды спорта и роли бот выбирает сам
@@ -160,12 +162,10 @@ bot.on(['text', 'photo', 'document'], async (ctx) => {
         return;
       }
       
-      if (subCommand === 'mst') {
-        return rateLimitMiddleware(ctx, async () => ctx.scene.enter('MST_SCENE'));
-      }
-      
-      if (subCommand === 'mst premium') {
-        return rateLimitMiddleware(ctx, () => ctx.scene.enter('MST_PREMIUM_SCENE'));
+      if (subCommand === 'mst' || subCommand.startsWith('mst ')) {
+        const mstArgs = args.slice(1);
+        if (isMstInfoCommand(mstArgs)) return handleMstCommand(ctx, mstArgs);
+        return rateLimitMiddleware(ctx, () => handleMstCommand(ctx, mstArgs));
       }
       
       if (subCommand === 'ns' || subCommand.startsWith('ns ')) {
